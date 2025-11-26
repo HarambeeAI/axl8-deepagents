@@ -1,4 +1,4 @@
-.PHONY: all lint format test help
+.PHONY: all lint format test help run test_integration test_watch
 
 # Default target executed when no arguments are given to make.
 all: help
@@ -8,13 +8,20 @@ all: help
 ######################
 
 # Define a variable for the test file path.
-TEST_FILE ?= tests/
+TEST_FILE ?= tests/unit_tests
+INTEGRATION_FILES ?= tests/integration_tests
 
 test:
-	uv run pytest --disable-socket --allow-unix-socket $(TEST_FILE) --timeout 10
+	uv run pytest --disable-socket --allow-unix-socket $(TEST_FILE)
+
+test_integration:
+	uv run pytest $(INTEGRATION_FILES)
 
 test_watch:
 	uv run ptw . -- $(TEST_FILE)
+
+run:
+	uvx --no-cache --reinstall .
 
 
 ######################
@@ -38,6 +45,8 @@ format format_diff:
 	[ "$(PYTHON_FILES)" = "" ] || uv run ruff format $(PYTHON_FILES)
 	[ "$(PYTHON_FILES)" = "" ] || uv run ruff check --fix $(PYTHON_FILES)
 
+format_unsafe:
+	[ "$(PYTHON_FILES)" = "" ] || uv run ruff format --unsafe-fixes $(PYTHON_FILES)
 	
 
 ######################

@@ -12,7 +12,7 @@ from langgraph.types import Overwrite
 
 from deepagents.backends import CompositeBackend, StateBackend, StoreBackend
 from deepagents.backends.utils import create_file_data, truncate_if_too_long, update_file_data
-from deepagents.middleware.filesystem import FILESYSTEM_SYSTEM_PROMPT, FileData, FilesystemMiddleware, FilesystemState
+from deepagents.middleware.filesystem import FileData, FilesystemMiddleware, FilesystemState
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.subagents import SubAgentMiddleware
 
@@ -64,33 +64,33 @@ class TestFilesystemMiddleware:
     def test_init_default(self):
         middleware = FilesystemMiddleware()
         assert callable(middleware.backend)
-        assert middleware.system_prompt == FILESYSTEM_SYSTEM_PROMPT
-        assert len(middleware.tools) == 6
+        assert middleware._custom_system_prompt is None
+        assert len(middleware.tools) == 7  # All tools including execute
 
     def test_init_with_composite_backend(self):
         backend_factory = lambda rt: build_composite_state_backend(rt, routes={"/memories/": (lambda r: StoreBackend(r))})
         middleware = FilesystemMiddleware(backend=backend_factory)
         assert callable(middleware.backend)
-        assert middleware.system_prompt == FILESYSTEM_SYSTEM_PROMPT
-        assert len(middleware.tools) == 6
+        assert middleware._custom_system_prompt is None
+        assert len(middleware.tools) == 7  # All tools including execute
 
     def test_init_custom_system_prompt_default(self):
         middleware = FilesystemMiddleware(system_prompt="Custom system prompt")
         assert callable(middleware.backend)
-        assert middleware.system_prompt == "Custom system prompt"
-        assert len(middleware.tools) == 6
+        assert middleware._custom_system_prompt == "Custom system prompt"
+        assert len(middleware.tools) == 7  # All tools including execute
 
     def test_init_custom_system_prompt_with_composite(self):
         backend_factory = lambda rt: build_composite_state_backend(rt, routes={"/memories/": (lambda r: StoreBackend(r))})
         middleware = FilesystemMiddleware(backend=backend_factory, system_prompt="Custom system prompt")
         assert callable(middleware.backend)
-        assert middleware.system_prompt == "Custom system prompt"
-        assert len(middleware.tools) == 6
+        assert middleware._custom_system_prompt == "Custom system prompt"
+        assert len(middleware.tools) == 7  # All tools including execute
 
     def test_init_custom_tool_descriptions_default(self):
         middleware = FilesystemMiddleware(custom_tool_descriptions={"ls": "Custom ls tool description"})
         assert callable(middleware.backend)
-        assert middleware.system_prompt == FILESYSTEM_SYSTEM_PROMPT
+        assert middleware._custom_system_prompt is None
         ls_tool = next(tool for tool in middleware.tools if tool.name == "ls")
         assert ls_tool.description == "Custom ls tool description"
 
@@ -98,7 +98,7 @@ class TestFilesystemMiddleware:
         backend_factory = lambda rt: build_composite_state_backend(rt, routes={"/memories/": (lambda r: StoreBackend(r))})
         middleware = FilesystemMiddleware(backend=backend_factory, custom_tool_descriptions={"ls": "Custom ls tool description"})
         assert callable(middleware.backend)
-        assert middleware.system_prompt == FILESYSTEM_SYSTEM_PROMPT
+        assert middleware._custom_system_prompt is None
         ls_tool = next(tool for tool in middleware.tools if tool.name == "ls")
         assert ls_tool.description == "Custom ls tool description"
 
@@ -123,7 +123,7 @@ class TestFilesystemMiddleware:
         result = ls_tool.invoke(
             {"runtime": ToolRuntime(state=state, context=None, tool_call_id="", store=None, stream_writer=lambda _: None, config={}), "path": "/"}
         )
-        assert result == ["/test.txt", "/test2.txt"]
+        assert result == str(["/test.txt", "/test2.txt"])
 
     def test_ls_shortterm_with_path(self):
         state = FilesystemState(
@@ -153,12 +153,13 @@ class TestFilesystemMiddleware:
         )
         middleware = FilesystemMiddleware()
         ls_tool = next(tool for tool in middleware.tools if tool.name == "ls")
-        result = ls_tool.invoke(
+        result_raw = ls_tool.invoke(
             {
                 "path": "/pokemon/",
                 "runtime": ToolRuntime(state=state, context=None, tool_call_id="", store=None, stream_writer=lambda _: None, config={}),
             }
         )
+        result = result_raw
         # ls should only return files directly in /pokemon/, not in subdirectories
         assert "/pokemon/test2.txt" in result
         assert "/pokemon/charmander.txt" in result
@@ -195,12 +196,13 @@ class TestFilesystemMiddleware:
         )
         middleware = FilesystemMiddleware()
         ls_tool = next(tool for tool in middleware.tools if tool.name == "ls")
-        result = ls_tool.invoke(
+        result_raw = ls_tool.invoke(
             {
                 "path": "/",
                 "runtime": ToolRuntime(state=state, context=None, tool_call_id="", store=None, stream_writer=lambda _: None, config={}),
             }
         )
+        result = result_raw
         # ls should list both files and directories at root level
         assert "/test.txt" in result
         assert "/pokemon/" in result
@@ -238,18 +240,15 @@ class TestFilesystemMiddleware:
         middleware = FilesystemMiddleware()
         glob_search_tool = next(tool for tool in middleware.tools if tool.name == "glob")
         print(glob_search_tool)
-        result = glob_search_tool.invoke(
+        result_raw = glob_search_tool.invoke(
             {
                 "pattern": "*.py",
                 "runtime": ToolRuntime(state=state, context=None, tool_call_id="", store=None, stream_writer=lambda _: None, config={}),
             }
         )
+        result = result_raw
         # Standard glob: *.py only matches files in root directory, not subdirectories
-        assert "/test.py" in result
-        assert "/test.txt" not in result
-        assert "/pokemon/charmander.py" not in result
-        assert len(result) == 1
-        assert result[0] == "/test.py"
+        assert result == str(["/test.py"])
 
     def test_glob_search_shortterm_wildcard_pattern(self):
         state = FilesystemState(
@@ -274,12 +273,13 @@ class TestFilesystemMiddleware:
         )
         middleware = FilesystemMiddleware()
         glob_search_tool = next(tool for tool in middleware.tools if tool.name == "glob")
-        result = glob_search_tool.invoke(
+        result_raw = glob_search_tool.invoke(
             {
                 "pattern": "**/*.py",
                 "runtime": ToolRuntime(state=state, context=None, tool_call_id="", store=None, stream_writer=lambda _: None, config={}),
             }
         )
+        result = result_raw
         assert "/src/main.py" in result
         assert "/src/utils/helper.py" in result
         assert "/tests/test_main.py" in result
@@ -307,13 +307,14 @@ class TestFilesystemMiddleware:
         )
         middleware = FilesystemMiddleware()
         glob_search_tool = next(tool for tool in middleware.tools if tool.name == "glob")
-        result = glob_search_tool.invoke(
+        result_raw = glob_search_tool.invoke(
             {
                 "pattern": "*.py",
                 "path": "/src",
                 "runtime": ToolRuntime(state=state, context=None, tool_call_id="", store=None, stream_writer=lambda _: None, config={}),
             }
         )
+        result = result_raw
         assert "/src/main.py" in result
         assert "/src/utils/helper.py" not in result
         assert "/tests/test_main.py" not in result
@@ -341,12 +342,13 @@ class TestFilesystemMiddleware:
         )
         middleware = FilesystemMiddleware()
         glob_search_tool = next(tool for tool in middleware.tools if tool.name == "glob")
-        result = glob_search_tool.invoke(
+        result_raw = glob_search_tool.invoke(
             {
                 "pattern": "*.{py,pyi}",
                 "runtime": ToolRuntime(state=state, context=None, tool_call_id="", store=None, stream_writer=lambda _: None, config={}),
             }
         )
+        result = result_raw
         assert "/test.py" in result
         assert "/test.pyi" in result
         assert "/test.txt" not in result
@@ -371,7 +373,42 @@ class TestFilesystemMiddleware:
             }
         )
         print(glob_search_tool)
-        assert result == []
+        assert result == str([])
+
+    def test_glob_search_truncates_large_results(self):
+        """Test that glob results are truncated when they exceed token limit."""
+        # Create a large number of files that will exceed TOOL_RESULT_TOKEN_LIMIT
+        # TOOL_RESULT_TOKEN_LIMIT = 20000, * 4 chars/token = 80000 chars
+        # Create files with long paths to exceed this limit
+        files = {}
+        # Create 2000 files with 50-char paths = 100,000 chars total (exceeds 80k limit)
+        for i in range(2000):
+            path = f"/very_long_file_name_to_increase_size_{i:04d}.txt"
+            files[path] = FileData(
+                content=["content"],
+                modified_at="2021-01-01",
+                created_at="2021-01-01",
+            )
+
+        state = FilesystemState(messages=[], files=files)
+        middleware = FilesystemMiddleware()
+        glob_search_tool = next(tool for tool in middleware.tools if tool.name == "glob")
+        result_raw = glob_search_tool.invoke(
+            {
+                "pattern": "*.txt",
+                "runtime": ToolRuntime(state=state, context=None, tool_call_id="", store=None, stream_writer=lambda _: None, config={}),
+            }
+        )
+
+        # Result should be truncated
+        result = result_raw
+        assert isinstance(result, str)
+        assert len(result.split(", ")) < 2000  # Should be truncated to fewer files
+        # Last element should be the truncation message
+        from deepagents.backends.utils import TRUNCATION_GUIDANCE
+
+        # Need to do the :-2 to account for the wrapping list characters
+        assert result[:-2].endswith(TRUNCATION_GUIDANCE)
 
     def test_grep_search_shortterm_files_with_matches(self):
         state = FilesystemState(
@@ -918,6 +955,226 @@ class TestFilesystemMiddleware:
 
         assert isinstance(result, Command)
         assert "/large_tool_results/test_call_id" in result.update["files"]
+
+    def test_execute_tool_returns_error_when_backend_doesnt_support(self):
+        """Test that execute tool returns friendly error instead of raising exception."""
+        state = FilesystemState(messages=[], files={})
+        middleware = FilesystemMiddleware()  # Default StateBackend doesn't support execution
+
+        # Find the execute tool
+        execute_tool = next(tool for tool in middleware.tools if tool.name == "execute")
+
+        # Create runtime with StateBackend
+        runtime = ToolRuntime(
+            state=state,
+            context=None,
+            tool_call_id="test_exec",
+            store=InMemoryStore(),
+            stream_writer=lambda _: None,
+            config={},
+        )
+
+        # Execute should return error message, not raise exception
+        result = execute_tool.invoke({"command": "ls -la", "runtime": runtime})
+
+        assert isinstance(result, str)
+        assert "Error: Execution not available" in result
+        assert "does not support command execution" in result
+
+    def test_execute_tool_output_formatting(self):
+        """Test execute tool formats output correctly."""
+        from deepagents.backends.protocol import ExecuteResponse
+
+        # Mock sandbox backend that returns specific output
+        class FormattingMockSandboxBackend(StateBackend):
+            def execute(self, command: str) -> ExecuteResponse:
+                return ExecuteResponse(
+                    output="Hello world\nLine 2",
+                    exit_code=0,
+                    truncated=False,
+                )
+
+            @property
+            def id(self):
+                return "formatting-mock-sandbox-backend"
+
+        state = FilesystemState(messages=[], files={})
+        rt = ToolRuntime(
+            state=state,
+            context=None,
+            tool_call_id="test_fmt",
+            store=InMemoryStore(),
+            stream_writer=lambda _: None,
+            config={},
+        )
+
+        backend = FormattingMockSandboxBackend(rt)
+        middleware = FilesystemMiddleware(backend=backend)
+
+        execute_tool = next(tool for tool in middleware.tools if tool.name == "execute")
+        result = execute_tool.invoke({"command": "echo test", "runtime": rt})
+
+        assert "Hello world\nLine 2" in result
+        assert "succeeded" in result
+        assert "exit code 0" in result
+
+    def test_execute_tool_output_formatting_with_failure(self):
+        """Test execute tool formats failure output correctly."""
+        from deepagents.backends.protocol import ExecuteResponse
+
+        # Mock sandbox backend that returns failure
+        class FailureMockSandboxBackend(StateBackend):
+            def execute(self, command: str) -> ExecuteResponse:
+                return ExecuteResponse(
+                    output="Error: command not found",
+                    exit_code=127,
+                    truncated=False,
+                )
+
+            @property
+            def id(self):
+                return "failure-mock-sandbox-backend"
+
+        state = FilesystemState(messages=[], files={})
+        rt = ToolRuntime(
+            state=state,
+            context=None,
+            tool_call_id="test_fail",
+            store=InMemoryStore(),
+            stream_writer=lambda _: None,
+            config={},
+        )
+
+        backend = FailureMockSandboxBackend(rt)
+        middleware = FilesystemMiddleware(backend=backend)
+
+        execute_tool = next(tool for tool in middleware.tools if tool.name == "execute")
+        result = execute_tool.invoke({"command": "nonexistent", "runtime": rt})
+
+        assert "Error: command not found" in result
+        assert "failed" in result
+        assert "exit code 127" in result
+
+    def test_execute_tool_output_formatting_with_truncation(self):
+        """Test execute tool formats truncated output correctly."""
+        from deepagents.backends.protocol import ExecuteResponse
+
+        # Mock sandbox backend that returns truncated output
+        class TruncatedMockSandboxBackend(StateBackend):
+            def execute(self, command: str) -> ExecuteResponse:
+                return ExecuteResponse(
+                    output="Very long output...",
+                    exit_code=0,
+                    truncated=True,
+                )
+
+            @property
+            def id(self):
+                return "failure-mock-sandbox-backend"
+
+        state = FilesystemState(messages=[], files={})
+        rt = ToolRuntime(
+            state=state,
+            context=None,
+            tool_call_id="test_trunc",
+            store=InMemoryStore(),
+            stream_writer=lambda _: None,
+            config={},
+        )
+
+        backend = TruncatedMockSandboxBackend(rt)
+        middleware = FilesystemMiddleware(backend=backend)
+
+        execute_tool = next(tool for tool in middleware.tools if tool.name == "execute")
+        result = execute_tool.invoke({"command": "cat large_file", "runtime": rt})
+
+        assert "Very long output..." in result
+        assert "truncated" in result
+
+    def test_supports_execution_helper_with_composite_backend(self):
+        """Test _supports_execution correctly identifies CompositeBackend capabilities."""
+        from deepagents.backends.protocol import ExecuteResponse
+        from deepagents.middleware.filesystem import _supports_execution
+
+        # Mock sandbox backend
+        class TestSandboxBackend(StateBackend):
+            def execute(self, command: str) -> ExecuteResponse:
+                return ExecuteResponse(output="test", exit_code=0, truncated=False)
+
+            @property
+            def id(self) -> str:
+                return "test-sandbox-backend"
+
+        state = FilesystemState(messages=[], files={})
+        rt = ToolRuntime(
+            state=state,
+            context=None,
+            tool_call_id="test",
+            store=InMemoryStore(),
+            stream_writer=lambda _: None,
+            config={},
+        )
+
+        # StateBackend doesn't support execution
+        state_backend = StateBackend(rt)
+        assert not _supports_execution(state_backend)
+
+        # TestSandboxBackend supports execution
+        sandbox_backend = TestSandboxBackend(rt)
+        assert _supports_execution(sandbox_backend)
+
+        # CompositeBackend with sandbox default supports execution
+        comp_with_sandbox = CompositeBackend(default=sandbox_backend, routes={})
+        assert _supports_execution(comp_with_sandbox)
+
+        # CompositeBackend with non-sandbox default doesn't support execution
+        comp_without_sandbox = CompositeBackend(default=state_backend, routes={})
+        assert not _supports_execution(comp_without_sandbox)
+
+    def test_intercept_truncates_content_sample_lines(self):
+        """Test that content sample in large tool result has lines limited to 1000 chars."""
+        from langgraph.types import Command
+
+        middleware = FilesystemMiddleware(tool_token_limit_before_evict=1000)
+        state = FilesystemState(messages=[], files={})
+        runtime = ToolRuntime(state=state, context=None, tool_call_id="test_123", store=None, stream_writer=lambda _: None, config={})
+
+        # Create content with multiple lines, some longer than 1000 chars
+        line1 = "short line"
+        line2 = "a" * 1500  # Long line that should be truncated
+        line3 = "another short line"
+        line4 = "b" * 2000  # Another long line
+        line5 = "c" * 500  # Short line
+        large_content = f"{line1}\n{line2}\n{line3}\n{line4}\n{line5}\n" + ("x" * 1000)
+
+        tool_message = ToolMessage(content=large_content, tool_call_id="test_123")
+        result = middleware._intercept_large_tool_result(tool_message, runtime)
+
+        assert isinstance(result, Command)
+        processed_message = result.update["messages"][0]
+        content_sample_section = processed_message.content
+
+        # Verify the message contains the expected structure
+        assert "Tool result too large" in content_sample_section
+        assert "first 10 lines" in content_sample_section
+
+        # Extract the content sample part (after "Here are the first 10 lines of the result:")
+        lines = content_sample_section.split("\n")
+
+        # Find where the actual content sample starts
+        sample_start_idx = None
+        for i, line in enumerate(lines):
+            if "first 10 lines" in line:
+                sample_start_idx = i + 1
+                break
+
+        assert sample_start_idx is not None, "Could not find content sample in message"
+
+        # Check each line in the content sample doesn't exceed 1000 chars
+        for i in range(sample_start_idx, len(lines)):
+            line = lines[i]
+            if line.strip():  # Skip empty lines
+                assert len(line) <= 1010, f"Line {i} exceeds 1000 chars: {len(line)} chars"
 
 
 class TestPatchToolCallsMiddleware:

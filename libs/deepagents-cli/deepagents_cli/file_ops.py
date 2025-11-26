@@ -5,9 +5,14 @@ from __future__ import annotations
 import difflib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from deepagents.backends.utils import perform_string_replacement
+
+from deepagents_cli.config import settings
+
+if TYPE_CHECKING:
+    from deepagents.backends.protocol import BACKEND_TYPES
 
 FileOpStatus = Literal["pending", "success", "error"]
 
@@ -108,6 +113,7 @@ class FileOperationRecord:
     before_content: str | None = None
     after_content: str | None = None
     read_output: str | None = None
+    hitl_approved: bool = False
 
 
 def resolve_physical_path(path_str: str | None, assistant_id: str | None) -> Path | None:
@@ -116,7 +122,7 @@ def resolve_physical_path(path_str: str | None, assistant_id: str | None) -> Pat
         return None
     try:
         if assistant_id and path_str.startswith("/memories/"):
-            agent_dir = Path.home() / ".deepagents" / assistant_id
+            agent_dir = settings.get_agent_dir(assistant_id)
             suffix = path_str.removeprefix("/memories/").lstrip("/")
             return (agent_dir / suffix).resolve()
         path = Path(path_str)
@@ -142,13 +148,10 @@ def format_display_path(path_str: str | None) -> str:
 
 def build_approval_preview(
     tool_name: str,
-    args: dict[str, Any] | None,
+    args: dict[str, Any],
     assistant_id: str | None,
 ) -> ApprovalPreview | None:
     """Collect summary info and diff for HITL approvals."""
-    if args is None:
-        return None
-
     path_str = str(args.get("file_path") or args.get("path") or "")
     display_path = format_display_path(path_str)
     physical_path = resolve_physical_path(path_str, assistant_id)
@@ -157,7 +160,7 @@ def build_approval_preview(
         content = str(args.get("content", ""))
         before = _safe_read(physical_path) if physical_path and physical_path.exists() else ""
         after = content
-        diff = compute_unified_diff(before or "", after, display_path, max_lines=None)
+        diff = compute_unified_diff(before or "", after, display_path, max_lines=100)
         additions = 0
         if diff:
             additions = sum(
@@ -236,8 +239,10 @@ def build_approval_preview(
 class FileOpTracker:
     """Collect file operation metrics during a CLI interaction."""
 
-    def __init__(self, *, assistant_id: str | None) -> None:
+    def __init__(self, *, assistant_id: str | None, backend: BACKEND_TYPES | None = None) -> None:
+        """Initialize the tracker."""
         self.assistant_id = assistant_id
+        self.backend = backend
         self.active: dict[str | None, FileOperationRecord] = {}
         self.completed: list[FileOperationRecord] = []
 
@@ -255,9 +260,53 @@ class FileOpTracker:
             tool_call_id=tool_call_id,
             args=args,
         )
-        if tool_name in {"write_file", "edit_file"} and record.physical_path:
-            record.before_content = _safe_read(record.physical_path) or ""
+        if tool_name in {"write_file", "edit_file"}:
+            if self.backend and path_str:
+                try:
+                    responses = self.backend.download_files([path_str])
+                    if (
+                        responses
+                        and responses[0].content is not None
+                        and responses[0].error is None
+                    ):
+                        record.before_content = responses[0].content.decode("utf-8")
+                    else:
+                        record.before_content = ""
+                except Exception:
+                    record.before_content = ""
+            elif record.physical_path:
+                record.before_content = _safe_read(record.physical_path) or ""
         self.active[tool_call_id] = record
+
+    def update_args(self, tool_call_id: str, args: dict[str, Any]) -> None:
+        """Update arguments for an active operation and retry capturing before_content."""
+        record = self.active.get(tool_call_id)
+        if not record:
+            return
+
+        record.args.update(args)
+
+        # If we haven't captured before_content yet, try again now that we might have the path
+        if record.before_content is None and record.tool_name in {"write_file", "edit_file"}:
+            path_str = str(record.args.get("file_path") or record.args.get("path") or "")
+            if path_str:
+                record.display_path = format_display_path(path_str)
+                record.physical_path = resolve_physical_path(path_str, self.assistant_id)
+                if self.backend:
+                    try:
+                        responses = self.backend.download_files([path_str])
+                        if (
+                            responses
+                            and responses[0].content is not None
+                            and responses[0].error is None
+                        ):
+                            record.before_content = responses[0].content.decode("utf-8")
+                        else:
+                            record.before_content = ""
+                    except Exception:
+                        record.before_content = ""
+                elif record.physical_path:
+                    record.before_content = _safe_read(record.physical_path) or ""
 
     def complete_with_message(self, tool_message: Any) -> FileOperationRecord | None:
         tool_call_id = getattr(tool_message, "tool_call_id", None)
@@ -304,6 +353,7 @@ class FileOpTracker:
             if isinstance(limit, int) and lines > limit:
                 record.metrics.end_line = (record.metrics.start_line or 1) + limit - 1
         else:
+            # For write/edit operations, read back from backend (or local filesystem)
             self._populate_after_content(record)
             if record.after_content is None:
                 record.status = "error"
@@ -316,7 +366,7 @@ class FileOpTracker:
                 record.before_content or "",
                 record.after_content,
                 record.display_path,
-                max_lines=None,
+                max_lines=100,
             )
             record.diff = diff
             if diff:
@@ -340,7 +390,7 @@ class FileOpTracker:
                     record.before_content or "",
                     record.after_content,
                     record.display_path,
-                    max_lines=None,
+                    max_lines=100,
                 )
             if record.diff is None and before_lines != record.metrics.lines_written:
                 record.metrics.lines_added = max(record.metrics.lines_written - before_lines, 0)
@@ -348,11 +398,44 @@ class FileOpTracker:
         self._finalize(record)
         return record
 
-    def _populate_after_content(self, record: FileOperationRecord) -> None:
-        if record.physical_path is None:
-            record.after_content = None
+    def mark_hitl_approved(self, tool_name: str, args: dict[str, Any]) -> None:
+        """Mark operations matching tool_name and file_path as HIL-approved."""
+        file_path = args.get("file_path") or args.get("path")
+        if not file_path:
             return
-        record.after_content = _safe_read(record.physical_path)
+
+        # Mark all active records that match
+        for record in self.active.values():
+            if record.tool_name == tool_name:
+                record_path = record.args.get("file_path") or record.args.get("path")
+                if record_path == file_path:
+                    record.hitl_approved = True
+
+    def _populate_after_content(self, record: FileOperationRecord) -> None:
+        # Use backend if available (works for any BackendProtocol implementation)
+        if self.backend:
+            try:
+                file_path = record.args.get("file_path") or record.args.get("path")
+                if file_path:
+                    responses = self.backend.download_files([file_path])
+                    if (
+                        responses
+                        and responses[0].content is not None
+                        and responses[0].error is None
+                    ):
+                        record.after_content = responses[0].content.decode("utf-8")
+                    else:
+                        record.after_content = None
+                else:
+                    record.after_content = None
+            except Exception:
+                record.after_content = None
+        else:
+            # Fallback: direct filesystem read when no backend provided
+            if record.physical_path is None:
+                record.after_content = None
+                return
+            record.after_content = _safe_read(record.physical_path)
 
     def _finalize(self, record: FileOperationRecord) -> None:
         self.completed.append(record)

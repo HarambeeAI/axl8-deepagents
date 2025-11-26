@@ -1,26 +1,27 @@
 [project]
 name = "deepagents-cli"
-version = "0.0.7"
+version = "0.0.10"
 description = "Deepagents CLI"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11,<4.0"
 dependencies = [
-  "deepagents==0.2.4",
+  "deepagents==0.2.8",
   "requests",
   "rich>=13.0.0",
   "prompt-toolkit>=3.0.52",
   "langchain-openai>=0.1.0",
   "tavily-python",
   "python-dotenv",
+  "daytona>=0.113.0",
+  "modal>=0.65.0",
+  "markdownify>=0.13.0",
+  "langchain>=1.0.7",
 ]
 
 [project.scripts]
 deepagents = "deepagents_cli:cli_main"
 deepagents-cli = "deepagents_cli:cli_main"
-
-[tool.uv.sources]
-deepagents = { workspace = true }
 
 [dependency-groups]
 test = [
@@ -30,6 +31,7 @@ test = [
     "pytest-mock>=3.14.0",
     "pytest-socket>=0.7.0",
     "pytest-timeout>=2.3.1",
+    "responses>=0.25.0",
     "ruff>=0.9.7",
 ]
 
@@ -100,7 +102,11 @@ ignore-var-parameters = true
     "S311",    # Allow pseudo-random generators in tests
     "ANN201",  # Missing return type annotation
     "INP001",  # Implicit namespace package
+    "PLR2004", # Magic value comparisons are fine in tests
 ]
+
+[tool.pytest.ini_options]
+timeout = 10  # Default timeout for all tests (can be overridden per-test)
 
 [tool.mypy]
 strict = true
@@ -109,3 +115,6 @@ enable_error_code = ["deprecated"]
 # Optional: reduce strictness if needed
 disallow_any_generics = false
 warn_return_any = false
+
+[tool.uv.sources]
+deepagents = { path = "../deepagents" }
