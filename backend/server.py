@@ -273,10 +273,13 @@ async def create_run_stream(thread_id: str, request: Request):
     
     async def generate_stream() -> AsyncGenerator[bytes, None]:
         """Generate SSE stream in LangGraph format."""
+        import traceback
         run_id = str(uuid.uuid4())
         
         try:
             thread["status"] = "busy"
+            print(f"[Stream] Starting run {run_id} for thread {thread_id}")
+            print(f"[Stream] Input messages: {input_messages}")
             
             # Send metadata event
             metadata_event = {
@@ -296,8 +299,11 @@ async def create_run_stream(thread_id: str, request: Request):
                 elif msg_type == "ai":
                     messages.append(AIMessage(content=content))
             
+            print(f"[Stream] Built {len(messages)} LangChain messages")
+            
             if not messages:
                 # No input, just return current state
+                print("[Stream] No messages, returning current state")
                 values_event = {"messages": thread["values"].get("messages", [])}
                 yield f"event: values\ndata: {json.dumps(values_event)}\n\n".encode()
                 yield f"event: end\ndata: null\n\n".encode()
@@ -305,7 +311,10 @@ async def create_run_stream(thread_id: str, request: Request):
                 return
             
             # Create and run agent
+            print("[Stream] Creating agent...")
             agent = create_agent()
+            print("[Stream] Agent created successfully")
+            
             run_config = {"configurable": {"thread_id": thread_id}}
             if config:
                 run_config["configurable"].update(config.get("configurable", {}))
@@ -313,13 +322,19 @@ async def create_run_stream(thread_id: str, request: Request):
             # Collect full response
             full_response = ""
             tool_calls = []
+            event_count = 0
             
+            print("[Stream] Starting agent stream...")
             async for event in agent.astream_events(
                 {"messages": messages},
                 config=run_config,
                 version="v2",
             ):
+                event_count += 1
                 event_type = event.get("event", "")
+                
+                if event_count <= 5 or event_count % 10 == 0:
+                    print(f"[Stream] Event {event_count}: {event_type}")
                 
                 if event_type == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
@@ -337,6 +352,7 @@ async def create_run_stream(thread_id: str, request: Request):
                 elif event_type == "on_tool_start":
                     tool_name = event.get("name", "")
                     tool_input = event.get("data", {}).get("input", {})
+                    print(f"[Stream] Tool start: {tool_name}")
                     tool_calls.append({
                         "name": tool_name,
                         "args": tool_input,
@@ -344,6 +360,8 @@ async def create_run_stream(thread_id: str, request: Request):
                 
                 elif event_type == "on_tool_end":
                     pass  # Tool results handled internally
+            
+            print(f"[Stream] Agent finished. Total events: {event_count}, Response length: {len(full_response)}")
             
             # Store the response in thread
             if full_response:
@@ -363,6 +381,8 @@ async def create_run_stream(thread_id: str, request: Request):
                         "content": msg.get("content", ""),
                     })
                 thread["values"]["messages"].append(ai_message)
+            else:
+                print("[Stream] WARNING: No response generated!")
             
             # Send final values
             values_event = thread["values"]
@@ -373,8 +393,11 @@ async def create_run_stream(thread_id: str, request: Request):
             
             thread["status"] = "idle"
             thread["updated_at"] = get_timestamp()
+            print(f"[Stream] Run {run_id} completed successfully")
             
         except Exception as e:
+            print(f"[Stream] ERROR: {str(e)}")
+            print(f"[Stream] Traceback: {traceback.format_exc()}")
             thread["status"] = "error"
             error_event = {"message": str(e)}
             yield f"event: error\ndata: {json.dumps(error_event)}\n\n".encode()
