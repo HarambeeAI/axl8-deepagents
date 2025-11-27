@@ -1,50 +1,30 @@
-"""FastAPI server for Deep Agents."""
+"""FastAPI server for Deep Agents - LangGraph API Compatible."""
 
+import json
 import os
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-from agent import create_agent, SYSTEM_PROMPT
-
-
-# Global checkpointer
-checkpointer = None
+from agent import create_agent
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan."""
-    global checkpointer
-    
-    # Initialize Postgres checkpointer if DATABASE_URL is set
-    database_url = os.getenv("DATABASE_URL")
-    if database_url:
-        try:
-            checkpointer = AsyncPostgresSaver.from_conn_string(database_url)
-            await checkpointer.setup()
-            print("Connected to Postgres for checkpointing")
-        except Exception as e:
-            print(f"Warning: Could not connect to Postgres: {e}")
-            checkpointer = None
-    
     yield
-    
-    # Cleanup
-    if checkpointer:
-        await checkpointer.conn.close()
 
 
 app = FastAPI(
     title="Deep Agents API",
-    description="API for interacting with Deep Agents",
+    description="LangGraph-compatible API for Deep Agents",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -59,43 +39,13 @@ app.add_middleware(
 )
 
 
-class ThreadCreate(BaseModel):
-    """Request to create a new thread."""
-    metadata: dict[str, Any] | None = None
-
-
-class ThreadResponse(BaseModel):
-    """Response for thread operations."""
-    thread_id: str
-    created_at: str | None = None
-    updated_at: str | None = None
-    status: str = "idle"
-    metadata: dict[str, Any] = {}
-    values: dict[str, Any] = {}
-
-
-class MessageInput(BaseModel):
-    """Input message from user."""
-    content: str
-    role: str = "user"
-
-
-class RunCreate(BaseModel):
-    """Request to run the agent."""
-    input: list[MessageInput]
-    config: dict[str, Any] | None = None
-    stream_mode: str | None = "messages"
-
-
-class AssistantResponse(BaseModel):
-    """Response for assistant info."""
-    assistant_id: str
-    name: str
-    config: dict[str, Any] = {}
-
-
-# In-memory thread storage (for demo, use Supabase in production)
+# In-memory thread storage
 threads: dict[str, dict] = {}
+
+
+def get_timestamp():
+    """Get current ISO timestamp."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 @app.get("/ok")
@@ -107,11 +57,10 @@ async def health_check():
 @app.get("/info")
 async def get_info():
     """Get server info."""
-    return {
-        "version": "0.1.0",
-        "name": "Deep Agents API",
-    }
+    return {"version": "0.1.0"}
 
+
+# ============ Assistants API ============
 
 @app.get("/assistants")
 async def list_assistants():
@@ -119,9 +68,28 @@ async def list_assistants():
     return [
         {
             "assistant_id": "agent",
+            "graph_id": "agent",
             "name": "Deep Agent",
             "config": {},
-            "metadata": {"description": "A powerful AI assistant with file and execution tools"},
+            "metadata": {},
+            "created_at": get_timestamp(),
+            "updated_at": get_timestamp(),
+        }
+    ]
+
+
+@app.post("/assistants/search")
+async def search_assistants(request: Request):
+    """Search assistants."""
+    return [
+        {
+            "assistant_id": "agent",
+            "graph_id": "agent",
+            "name": "Deep Agent",
+            "config": {},
+            "metadata": {},
+            "created_at": get_timestamp(),
+            "updated_at": get_timestamp(),
         }
     ]
 
@@ -133,21 +101,35 @@ async def get_assistant(assistant_id: str):
         raise HTTPException(status_code=404, detail="Assistant not found")
     return {
         "assistant_id": "agent",
+        "graph_id": "agent",
         "name": "Deep Agent",
         "config": {},
-        "metadata": {"description": "A powerful AI assistant with file and execution tools"},
+        "metadata": {},
+        "created_at": get_timestamp(),
+        "updated_at": get_timestamp(),
     }
 
 
+# ============ Threads API ============
+
 @app.post("/threads")
-async def create_thread(request: ThreadCreate | None = None):
+async def create_thread(request: Request):
     """Create a new thread."""
+    body = {}
+    try:
+        body = await request.json()
+    except:
+        pass
+    
     thread_id = str(uuid.uuid4())
+    now = get_timestamp()
     thread = {
         "thread_id": thread_id,
         "status": "idle",
-        "metadata": request.metadata if request and request.metadata else {},
-        "values": {"messages": []},
+        "created_at": now,
+        "updated_at": now,
+        "metadata": body.get("metadata", {}),
+        "values": {"messages": [], "todos": [], "files": {}},
     }
     threads[thread_id] = thread
     return thread
@@ -157,67 +139,184 @@ async def create_thread(request: ThreadCreate | None = None):
 async def get_thread(thread_id: str):
     """Get thread by ID."""
     if thread_id not in threads:
-        # Create thread if it doesn't exist
+        now = get_timestamp()
         threads[thread_id] = {
             "thread_id": thread_id,
             "status": "idle",
+            "created_at": now,
+            "updated_at": now,
             "metadata": {},
-            "values": {"messages": []},
+            "values": {"messages": [], "todos": [], "files": {}},
         }
     return threads[thread_id]
 
 
 @app.post("/threads/search")
-async def search_threads(
-    limit: int = 10,
-    offset: int = 0,
-    metadata: dict[str, Any] | None = None,
-):
+async def search_threads(request: Request):
     """Search threads."""
+    body = {}
+    try:
+        body = await request.json()
+    except:
+        pass
+    
+    limit = body.get("limit", 10)
+    offset = body.get("offset", 0)
     all_threads = list(threads.values())
     return all_threads[offset:offset + limit]
 
 
-@app.post("/threads/{thread_id}/runs")
-async def create_run(thread_id: str, request: RunCreate):
-    """Create a run for a thread."""
-    # Ensure thread exists
+@app.patch("/threads/{thread_id}")
+async def update_thread(thread_id: str, request: Request):
+    """Update thread metadata."""
     if thread_id not in threads:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    
+    body = await request.json()
+    thread = threads[thread_id]
+    if "metadata" in body:
+        thread["metadata"].update(body["metadata"])
+    thread["updated_at"] = get_timestamp()
+    return thread
+
+
+# ============ Thread State API ============
+
+@app.get("/threads/{thread_id}/state")
+async def get_thread_state(thread_id: str):
+    """Get the current state of a thread."""
+    if thread_id not in threads:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    
+    thread = threads[thread_id]
+    return {
+        "values": thread.get("values", {}),
+        "next": [],
+        "checkpoint": {
+            "thread_id": thread_id,
+            "checkpoint_ns": "",
+            "checkpoint_id": str(uuid.uuid4()),
+        },
+        "metadata": thread.get("metadata", {}),
+        "created_at": thread.get("created_at"),
+        "parent_checkpoint": None,
+    }
+
+
+@app.post("/threads/{thread_id}/state")
+async def update_thread_state(thread_id: str, request: Request):
+    """Update thread state."""
+    if thread_id not in threads:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    
+    body = await request.json()
+    thread = threads[thread_id]
+    
+    if "values" in body:
+        thread["values"].update(body["values"])
+    thread["updated_at"] = get_timestamp()
+    
+    return {"checkpoint": {"thread_id": thread_id}}
+
+
+# ============ Runs API ============
+
+@app.post("/threads/{thread_id}/runs")
+async def create_run(thread_id: str, request: Request):
+    """Create a run (non-streaming)."""
+    body = await request.json()
+    
+    if thread_id not in threads:
+        now = get_timestamp()
         threads[thread_id] = {
             "thread_id": thread_id,
             "status": "idle",
+            "created_at": now,
+            "updated_at": now,
             "metadata": {},
-            "values": {"messages": []},
+            "values": {"messages": [], "todos": [], "files": {}},
+        }
+    
+    run_id = str(uuid.uuid4())
+    return {
+        "run_id": run_id,
+        "thread_id": thread_id,
+        "status": "pending",
+        "created_at": get_timestamp(),
+    }
+
+
+@app.post("/threads/{thread_id}/runs/stream")
+async def create_run_stream(thread_id: str, request: Request):
+    """Create a streaming run - main endpoint for chat."""
+    body = await request.json()
+    
+    # Ensure thread exists
+    if thread_id not in threads:
+        now = get_timestamp()
+        threads[thread_id] = {
+            "thread_id": thread_id,
+            "status": "idle",
+            "created_at": now,
+            "updated_at": now,
+            "metadata": {"assistant_id": body.get("assistant_id", "agent")},
+            "values": {"messages": [], "todos": [], "files": {}},
         }
     
     thread = threads[thread_id]
+    input_data = body.get("input", {})
+    config = body.get("config", {})
+    stream_mode = body.get("stream_mode", ["messages"])
     
-    # Build messages
-    messages = []
-    for msg in request.input:
-        if msg.role == "user":
-            messages.append(HumanMessage(content=msg.content))
-        elif msg.role == "assistant":
-            messages.append(AIMessage(content=msg.content))
-        elif msg.role == "system":
-            messages.append(SystemMessage(content=msg.content))
+    # Extract messages from input
+    input_messages = input_data.get("messages", [])
     
-    # Create agent with checkpointer
-    agent = create_agent()
-    
-    # Run configuration
-    config = {"configurable": {"thread_id": thread_id}}
-    if request.config:
-        config.update(request.config)
-    
-    async def generate_stream() -> AsyncGenerator[str, None]:
-        """Generate streaming response."""
+    async def generate_stream() -> AsyncGenerator[bytes, None]:
+        """Generate SSE stream in LangGraph format."""
+        run_id = str(uuid.uuid4())
+        
         try:
             thread["status"] = "busy"
             
+            # Send metadata event
+            metadata_event = {
+                "run_id": run_id,
+                "thread_id": thread_id,
+                "assistant_id": body.get("assistant_id", "agent"),
+            }
+            yield f"event: metadata\ndata: {json.dumps(metadata_event)}\n\n".encode()
+            
+            # Build LangChain messages
+            messages = []
+            for msg in input_messages:
+                content = msg.get("content", "")
+                msg_type = msg.get("type", "human")
+                if msg_type == "human":
+                    messages.append(HumanMessage(content=content))
+                elif msg_type == "ai":
+                    messages.append(AIMessage(content=content))
+            
+            if not messages:
+                # No input, just return current state
+                values_event = {"messages": thread["values"].get("messages", [])}
+                yield f"event: values\ndata: {json.dumps(values_event)}\n\n".encode()
+                yield f"event: end\ndata: null\n\n".encode()
+                thread["status"] = "idle"
+                return
+            
+            # Create and run agent
+            agent = create_agent()
+            run_config = {"configurable": {"thread_id": thread_id}}
+            if config:
+                run_config["configurable"].update(config.get("configurable", {}))
+            
+            # Collect full response
+            full_response = ""
+            tool_calls = []
+            
             async for event in agent.astream_events(
                 {"messages": messages},
-                config=config,
+                config=run_config,
                 version="v2",
             ):
                 event_type = event.get("event", "")
@@ -225,23 +324,60 @@ async def create_run(thread_id: str, request: RunCreate):
                 if event_type == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
-                        yield f"data: {{'type': 'token', 'content': {repr(chunk.content)}}}\n\n"
+                        content = chunk.content
+                        if isinstance(content, str):
+                            full_response += content
+                            # Send messages/partial event
+                            msg_event = [{
+                                "type": "ai",
+                                "content": content,
+                            }]
+                            yield f"event: messages/partial\ndata: {json.dumps(msg_event)}\n\n".encode()
                 
                 elif event_type == "on_tool_start":
                     tool_name = event.get("name", "")
                     tool_input = event.get("data", {}).get("input", {})
-                    yield f"data: {{'type': 'tool_start', 'name': {repr(tool_name)}, 'input': {repr(str(tool_input))}}}\n\n"
+                    tool_calls.append({
+                        "name": tool_name,
+                        "args": tool_input,
+                    })
                 
                 elif event_type == "on_tool_end":
-                    tool_output = event.get("data", {}).get("output", "")
-                    yield f"data: {{'type': 'tool_end', 'output': {repr(str(tool_output)[:500])}}}\n\n"
+                    pass  # Tool results handled internally
+            
+            # Store the response in thread
+            if full_response:
+                ai_message = {
+                    "id": str(uuid.uuid4()),
+                    "type": "ai",
+                    "content": full_response,
+                }
+                if tool_calls:
+                    ai_message["tool_calls"] = tool_calls
+                
+                # Add user message and AI response to thread
+                for msg in input_messages:
+                    thread["values"]["messages"].append({
+                        "id": msg.get("id", str(uuid.uuid4())),
+                        "type": msg.get("type", "human"),
+                        "content": msg.get("content", ""),
+                    })
+                thread["values"]["messages"].append(ai_message)
+            
+            # Send final values
+            values_event = thread["values"]
+            yield f"event: values\ndata: {json.dumps(values_event)}\n\n".encode()
+            
+            # Send end event
+            yield f"event: end\ndata: null\n\n".encode()
             
             thread["status"] = "idle"
-            yield "data: {'type': 'done'}\n\n"
+            thread["updated_at"] = get_timestamp()
             
         except Exception as e:
             thread["status"] = "error"
-            yield f"data: {{'type': 'error', 'message': {repr(str(e))}}}\n\n"
+            error_event = {"message": str(e)}
+            yield f"event: error\ndata: {json.dumps(error_event)}\n\n".encode()
     
     return StreamingResponse(
         generate_stream(),
@@ -249,16 +385,39 @@ async def create_run(thread_id: str, request: RunCreate):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
         },
     )
 
 
-@app.get("/threads/{thread_id}/state")
-async def get_thread_state(thread_id: str):
-    """Get the current state of a thread."""
+@app.get("/threads/{thread_id}/runs/{run_id}")
+async def get_run(thread_id: str, run_id: str):
+    """Get run status."""
+    return {
+        "run_id": run_id,
+        "thread_id": thread_id,
+        "status": "success",
+        "created_at": get_timestamp(),
+    }
+
+
+@app.get("/threads/{thread_id}/history")
+async def get_thread_history(thread_id: str):
+    """Get thread history."""
     if thread_id not in threads:
-        raise HTTPException(status_code=404, detail="Thread not found")
-    return threads[thread_id]
+        return []
+    
+    thread = threads[thread_id]
+    return [{
+        "checkpoint": {
+            "thread_id": thread_id,
+            "checkpoint_ns": "",
+            "checkpoint_id": str(uuid.uuid4()),
+        },
+        "values": thread.get("values", {}),
+        "metadata": thread.get("metadata", {}),
+        "created_at": thread.get("created_at"),
+    }]
 
 
 if __name__ == "__main__":
