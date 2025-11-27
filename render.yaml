@@ -1,0 +1,28 @@
+# Render Blueprint for Deep Agents
+# https://render.com/docs/blueprint-spec
+
+services:
+  # Backend - LangGraph API Server
+  - type: web
+    name: worryless-deepagents
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    region: oregon
+    plan: standard
+    healthCheckPath: /ok
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: LANGSMITH_API_KEY
+        sync: false
+      - key: LANGCHAIN_TRACING_V2
+        value: "true"
+      - key: LANGCHAIN_PROJECT
+        value: worryless-deepagents
+      - key: SUPABASE_URL
+        value: https://gbplvxvvshumapgmscrk.supabase.co
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
