@@ -338,14 +338,34 @@ async def create_run_stream(thread_id: str, request: Request):
                 
                 if event_type == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
-                    if chunk and hasattr(chunk, "content") and chunk.content:
+                    if chunk and hasattr(chunk, "content"):
                         content = chunk.content
+                        # Log first few content samples to debug format
+                        if event_count <= 25:
+                            print(f"[Stream] Content type: {type(content)}, value: {repr(content)[:100]}")
+                        
+                        # Handle different content formats
+                        text_content = ""
                         if isinstance(content, str):
-                            full_response += content
+                            text_content = content
+                        elif isinstance(content, list):
+                            # Anthropic returns list of content blocks
+                            for block in content:
+                                if isinstance(block, dict) and block.get("type") == "text":
+                                    text_content += block.get("text", "")
+                                elif isinstance(block, str):
+                                    text_content += block
+                                elif hasattr(block, "text"):
+                                    text_content += block.text
+                        elif hasattr(content, "text"):
+                            text_content = content.text
+                        
+                        if text_content:
+                            full_response += text_content
                             # Send messages/partial event
                             msg_event = [{
                                 "type": "ai",
-                                "content": content,
+                                "content": text_content,
                             }]
                             yield f"event: messages/partial\ndata: {json.dumps(msg_event)}\n\n".encode()
                 
