@@ -22,5 +22,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 EXPOSE 10000
 
 # Run LangGraph API server
-# Render sets PORT env var, default to 10000
-CMD langgraph up --host 0.0.0.0 --port ${PORT:-10000}
+# langgraph up uses --port only, binds to 0.0.0.0 by default
+CMD langgraph up --port ${PORT:-10000}
