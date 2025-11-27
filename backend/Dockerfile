@@ -21,6 +21,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Expose port for LangGraph API (Render uses PORT env var)
 EXPOSE 10000
 
-# Run LangGraph API server
-# langgraph up uses --port only, binds to 0.0.0.0 by default
-CMD langgraph up --port ${PORT:-10000}
+# Run FastAPI server with uvicorn
+CMD python server.py
