@@ -517,6 +517,32 @@ async def create_run_stream(thread_id: str, request: Request):
                         current_node = event_name
                         print(f"[Stream] Node: {current_node}")
                 
+                # Reset AI message state when model starts a new invocation
+                if event_type == "on_chat_model_start":
+                    # If we have a previous AI message with content, finalize it
+                    if accumulated_content or current_ai_message["tool_calls"]:
+                        final_msg = {
+                            "id": current_ai_message["id"],
+                            "type": "ai",
+                            "content": accumulated_content,
+                        }
+                        if current_ai_message["tool_calls"]:
+                            final_msg["tool_calls"] = current_ai_message["tool_calls"]
+                        
+                        # Add to thread if not already there
+                        if not any(m.get("id") == current_ai_message["id"] for m in thread["values"]["messages"]):
+                            thread["values"]["messages"].append(final_msg)
+                    
+                    # Start fresh AI message for this model invocation
+                    current_ai_message = {
+                        "id": str(uuid.uuid4()),
+                        "type": "ai",
+                        "content": "",
+                        "tool_calls": [],
+                    }
+                    accumulated_content = ""
+                    print(f"[Stream] New AI message: {current_ai_message['id']}", flush=True)
+                
                 # Handle chat model streaming
                 if event_type == "on_chat_model_stream":
                     chunk = event_data.get("chunk")
@@ -571,7 +597,31 @@ async def create_run_stream(thread_id: str, request: Request):
                 elif event_type == "on_tool_start":
                     tool_name = event.get("name", "")
                     tool_input = event_data.get("input", {})
-                    print(f"[Stream] Tool start: {tool_name}", flush=True)
+                    print(f"[Stream] Tool start: {tool_name} with input keys: {list(tool_input.keys()) if isinstance(tool_input, dict) else 'not dict'}", flush=True)
+                    
+                    # Extract todos from write_todos tool INPUT (not output)
+                    if tool_name == "write_todos" and isinstance(tool_input, dict):
+                        todos_input = tool_input.get("todos", [])
+                        if todos_input:
+                            # Convert to frontend format
+                            formatted_todos = []
+                            for i, todo in enumerate(todos_input):
+                                if isinstance(todo, dict):
+                                    formatted_todos.append({
+                                        "id": todo.get("id", str(i)),
+                                        "content": todo.get("content", todo.get("description", str(todo))),
+                                        "status": todo.get("status", "pending"),
+                                    })
+                                elif isinstance(todo, str):
+                                    formatted_todos.append({
+                                        "id": str(i),
+                                        "content": todo,
+                                        "status": "pending",
+                                    })
+                            thread["values"]["todos"] = formatted_todos
+                            print(f"[Stream] Todos extracted from input: {len(formatted_todos)} items", flush=True)
+                            yield make_event("values", thread["values"])
+                            await asyncio.sleep(0)
                     
                     # If we have accumulated content or tool calls, send the AI message first
                     if accumulated_content or current_ai_message["tool_calls"]:
@@ -626,19 +676,9 @@ async def create_run_stream(thread_id: str, request: Request):
                     
                     thread["values"]["messages"].append(tool_msg)
                     
-                    # Handle write_todos output - extract todos from tool output
-                    if tool_name == "write_todos" and tool_output:
-                        try:
-                            # The tool output might contain the todos
-                            if isinstance(tool_output, dict) and "todos" in tool_output:
-                                thread["values"]["todos"] = tool_output["todos"]
-                            elif isinstance(tool_output, list):
-                                thread["values"]["todos"] = tool_output
-                            print(f"[Stream] Todos from tool: {len(thread['values'].get('todos', []))} items", flush=True)
-                            yield make_event("values", thread["values"])
-                            await asyncio.sleep(0)
-                        except Exception as e:
-                            print(f"[Stream] Error parsing todos: {e}", flush=True)
+                    # Remove processed tool call from pending
+                    if tool_call_id and tool_call_id in pending_tool_calls:
+                        del pending_tool_calls[tool_call_id]
                     
                     # Send update event for tool completion
                     yield make_event("updates", {
