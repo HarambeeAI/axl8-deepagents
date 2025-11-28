@@ -31,6 +31,10 @@ from langchain_core.messages import (
 from agent import create_agent
 from sandbox import LocalSandbox
 
+# Disable LangSmith tracing to avoid 403 errors
+os.environ["LANGCHAIN_TRACING_V2"] = "false"
+os.environ["LANGSMITH_TRACING"] = "false"
+
 # Force unbuffered output for real-time logging
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -501,6 +505,11 @@ async def create_run_stream(thread_id: str, request: Request):
             # Track tool call IDs for matching tool results
             pending_tool_calls: dict[str, dict] = {}  # tool_call_id -> {name, args}
             
+            # Track run hierarchy to filter subagent events
+            # We only want to stream messages from the main agent, not nested subagents
+            main_run_id: Optional[str] = None
+            active_task_tools: set[str] = set()  # Track active 'task' tool run_ids
+            
             print("[Stream] Starting agent stream...")
             async for event in agent.astream_events(
                 {"messages": messages},
@@ -510,6 +519,31 @@ async def create_run_stream(thread_id: str, request: Request):
                 event_type = event.get("event", "")
                 event_name = event.get("name", "")
                 event_data = event.get("data", {})
+                run_id = event.get("run_id", "")
+                parent_ids = event.get("parent_ids", [])
+                tags = event.get("tags", [])
+                
+                # Capture the main run ID from the first chain start
+                if event_type == "on_chain_start" and main_run_id is None:
+                    main_run_id = run_id
+                
+                # Check if this event is from a subagent (nested inside a task tool)
+                # We check this BEFORE updating active_task_tools so that task tool
+                # start/end events themselves are not filtered
+                is_subagent_event = False
+                for parent_id in parent_ids:
+                    if parent_id in active_task_tools:
+                        is_subagent_event = True
+                        break
+                
+                # Track when 'task' tools start/end (these spawn subagents)
+                # Do this AFTER checking is_subagent_event so task tool events are not filtered
+                if event_type == "on_tool_start" and event_name == "task":
+                    active_task_tools.add(run_id)
+                    print(f"[Stream] Subagent started: {run_id}", flush=True)
+                elif event_type == "on_tool_end" and run_id in active_task_tools:
+                    active_task_tools.discard(run_id)
+                    print(f"[Stream] Subagent ended: {run_id}", flush=True)
                 
                 # Track node transitions
                 if event_type == "on_chain_start" and event_name:
@@ -517,8 +551,8 @@ async def create_run_stream(thread_id: str, request: Request):
                         current_node = event_name
                         print(f"[Stream] Node: {current_node}")
                 
-                # Reset AI message state when model starts a new invocation
-                if event_type == "on_chat_model_start":
+                # Reset AI message state when model starts a new invocation (main agent only)
+                if event_type == "on_chat_model_start" and not is_subagent_event:
                     # If we have a previous AI message with content, finalize it
                     if accumulated_content or current_ai_message["tool_calls"]:
                         final_msg = {
@@ -543,8 +577,8 @@ async def create_run_stream(thread_id: str, request: Request):
                     accumulated_content = ""
                     print(f"[Stream] New AI message: {current_ai_message['id']}", flush=True)
                 
-                # Handle chat model streaming
-                if event_type == "on_chat_model_stream":
+                # Handle chat model streaming (main agent only - skip subagent messages)
+                if event_type == "on_chat_model_stream" and not is_subagent_event:
                     chunk = event_data.get("chunk")
                     if chunk:
                         # Extract text content
@@ -593,8 +627,8 @@ async def create_run_stream(thread_id: str, request: Request):
                                         pending_tool_calls[tc_id] = tool_call
                                         print(f"[Stream] Tool call added: {tc_name} (id={tc_id})", flush=True)
                 
-                # Handle tool execution
-                elif event_type == "on_tool_start":
+                # Handle tool execution (main agent tools only, not subagent internal tools)
+                elif event_type == "on_tool_start" and not is_subagent_event:
                     tool_name = event.get("name", "")
                     tool_input = event_data.get("input", {})
                     print(f"[Stream] Tool start: {tool_name} with input keys: {list(tool_input.keys()) if isinstance(tool_input, dict) else 'not dict'}", flush=True)
@@ -651,7 +685,7 @@ async def create_run_stream(thread_id: str, request: Request):
                     })
                     await asyncio.sleep(0)  # Flush immediately
                 
-                elif event_type == "on_tool_end":
+                elif event_type == "on_tool_end" and not is_subagent_event:
                     tool_name = event.get("name", "")
                     tool_output = event_data.get("output", "")
                     run_id = event.get("run_id", "")
