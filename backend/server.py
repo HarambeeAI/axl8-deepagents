@@ -535,8 +535,11 @@ async def create_run_stream(thread_id: str, request: Request):
             agent = create_agent(sandbox)
             print(f"[Stream] Agent created with sandbox at {sandbox.working_dir}")
             
-            # Configure run
-            run_config = {"configurable": {"thread_id": thread_id}}
+            # Configure run with high recursion limit for complex tasks
+            run_config = {
+                "configurable": {"thread_id": thread_id},
+                "recursion_limit": 500,  # Allow up to 500 tool calls per run
+            }
             if config:
                 run_config["configurable"].update(config.get("configurable", {}))
             
