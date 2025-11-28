@@ -4,7 +4,7 @@ This server implements the LangGraph API specification to work with the
 deep-agents-ui frontend. It properly streams:
 - messages (AI responses with tool calls)
 - todos (planning state)
-- files (filesystem state)
+- files (filesystem state) - synced from sandbox after each tool
 - updates (per-node execution updates)
 """
 
@@ -12,9 +12,11 @@ import json
 import os
 import uuid
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Optional
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +31,9 @@ from langchain_core.messages import (
 from agent import create_agent
 from sandbox import LocalSandbox
 
+# Force unbuffered output for real-time logging
+sys.stdout.reconfigure(line_buffering=True)
+
 
 # Global sandbox instance (shared across requests for persistence)
 _sandbox: Optional[LocalSandbox] = None
@@ -38,9 +43,49 @@ def get_sandbox() -> LocalSandbox:
     """Get or create the global sandbox instance."""
     global _sandbox
     if _sandbox is None:
-        workspace_dir = os.getenv("SANDBOX_WORKSPACE", "/tmp/deepagent_workspace")
+        workspace_dir = os.getenv("SANDBOX_WORKSPACE", "/workspace")
         _sandbox = LocalSandbox(working_dir=workspace_dir)
     return _sandbox
+
+
+def sync_sandbox_files_to_state(sandbox: LocalSandbox, thread_state: dict) -> bool:
+    """Sync files from sandbox filesystem to thread state.
+    
+    Returns True if files were updated.
+    """
+    updated = False
+    workspace = sandbox.working_dir
+    
+    # Walk the workspace and read all files
+    for root, dirs, files in os.walk(workspace):
+        # Skip hidden directories
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        
+        for filename in files:
+            if filename.startswith('.'):
+                continue
+                
+            full_path = Path(root) / filename
+            rel_path = "/" + str(full_path.relative_to(workspace))
+            
+            try:
+                # Only read text files under 100KB
+                if full_path.stat().st_size > 100000:
+                    continue
+                    
+                content = full_path.read_text(errors='ignore')
+                
+                # Check if file is new or changed
+                if rel_path not in thread_state.get("files", {}) or \
+                   thread_state["files"].get(rel_path) != content:
+                    if "files" not in thread_state:
+                        thread_state["files"] = {}
+                    thread_state["files"][rel_path] = content
+                    updated = True
+            except Exception:
+                pass
+    
+    return updated
 
 
 @asynccontextmanager
@@ -382,7 +427,9 @@ async def create_run_stream(thread_id: str, request: Request):
         def make_event(event_type: str, data: Any) -> bytes:
             nonlocal event_id
             event_id += 1
-            return f"id: {event_id}\nevent: {event_type}\ndata: {json.dumps(data)}\n\n".encode()
+            event_str = f"id: {event_id}\nevent: {event_type}\ndata: {json.dumps(data)}\n\n"
+            print(f"[SSE] Sending event {event_id}: {event_type}", flush=True)
+            return event_str.encode()
         
         try:
             thread["status"] = "busy"
@@ -396,6 +443,7 @@ async def create_run_stream(thread_id: str, request: Request):
                 "thread_id": thread_id,
                 "assistant_id": body.get("assistant_id", "agent"),
             })
+            await asyncio.sleep(0)  # Flush
             
             # Build LangChain messages from input
             messages = []
@@ -494,6 +542,7 @@ async def create_run_stream(thread_id: str, request: Request):
                                 "type": "ai",
                                 "content": text_content,
                             }])
+                            await asyncio.sleep(0)  # Flush for real-time streaming
                         
                         # Handle tool calls in chunk
                         if hasattr(chunk, "tool_calls") and chunk.tool_calls:
@@ -522,11 +571,12 @@ async def create_run_stream(thread_id: str, request: Request):
                             }]
                         }
                     })
+                    await asyncio.sleep(0)  # Flush immediately
                 
                 elif event_type == "on_tool_end":
                     tool_name = event.get("name", "")
                     tool_output = event_data.get("output", "")
-                    print(f"[Stream] Tool end: {tool_name}")
+                    print(f"[Stream] Tool end: {tool_name}", flush=True)
                     
                     # Add tool message to thread
                     tool_msg = {
@@ -543,6 +593,14 @@ async def create_run_stream(thread_id: str, request: Request):
                             "messages": [tool_msg]
                         }
                     })
+                    await asyncio.sleep(0)  # Flush immediately
+                    
+                    # Sync files from sandbox after file-related tools
+                    if tool_name in ("write_file", "edit_file"):
+                        if sync_sandbox_files_to_state(sandbox, thread["values"]):
+                            print(f"[Stream] Files synced: {list(thread['values'].get('files', {}).keys())}", flush=True)
+                            yield make_event("values", thread["values"])
+                            await asyncio.sleep(0)  # Flush immediately
                 
                 # Handle state updates (todos, files)
                 elif event_type == "on_chain_end":
@@ -551,8 +609,9 @@ async def create_run_stream(thread_id: str, request: Request):
                         # Check for todos update
                         if "todos" in output:
                             thread["values"]["todos"] = output["todos"]
-                            print(f"[Stream] Todos updated: {len(output['todos'])} items")
+                            print(f"[Stream] Todos updated: {len(output['todos'])} items", flush=True)
                             yield make_event("values", thread["values"])
+                            await asyncio.sleep(0)  # Flush immediately
                         
                         # Check for files update
                         if "files" in output:
