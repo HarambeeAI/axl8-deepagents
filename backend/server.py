@@ -1,31 +1,63 @@
-"""FastAPI server for Deep Agents - LangGraph API Compatible."""
+"""FastAPI server for Deep Agents - Full LangGraph API Compatible.
+
+This server implements the LangGraph API specification to work with the
+deep-agents-ui frontend. It properly streams:
+- messages (AI responses with tool calls)
+- todos (planning state)
+- files (filesystem state)
+- updates (per-node execution updates)
+"""
 
 import json
 import os
 import uuid
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import (
+    HumanMessage,
+    AIMessage,
+    ToolMessage,
+    BaseMessage,
+)
 
 from agent import create_agent
+from sandbox import LocalSandbox
+
+
+# Global sandbox instance (shared across requests for persistence)
+_sandbox: Optional[LocalSandbox] = None
+
+
+def get_sandbox() -> LocalSandbox:
+    """Get or create the global sandbox instance."""
+    global _sandbox
+    if _sandbox is None:
+        workspace_dir = os.getenv("SANDBOX_WORKSPACE", "/tmp/deepagent_workspace")
+        _sandbox = LocalSandbox(working_dir=workspace_dir)
+    return _sandbox
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan."""
+    # Startup: initialize sandbox
+    get_sandbox()
     yield
+    # Shutdown: cleanup
+    if _sandbox:
+        _sandbox.cleanup()
 
 
 app = FastAPI(
     title="Deep Agents API",
-    description="LangGraph-compatible API for Deep Agents",
-    version="0.1.0",
+    description="Full LangGraph-compatible API for Deep Agents",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -39,7 +71,7 @@ app.add_middleware(
 )
 
 
-# In-memory thread storage
+# In-memory thread storage with proper state structure
 threads: dict[str, dict] = {}
 
 
@@ -47,6 +79,76 @@ def get_timestamp():
     """Get current ISO timestamp."""
     return datetime.now(timezone.utc).isoformat()
 
+
+def create_empty_state() -> dict:
+    """Create empty agent state with all required fields."""
+    return {
+        "messages": [],
+        "todos": [],
+        "files": {},
+    }
+
+
+def serialize_message(msg: BaseMessage) -> dict:
+    """Serialize a LangChain message to dict format for the frontend."""
+    result = {
+        "id": getattr(msg, "id", str(uuid.uuid4())),
+        "type": msg.type,
+        "content": msg.content if isinstance(msg.content, str) else "",
+    }
+    
+    # Handle tool calls for AI messages
+    if hasattr(msg, "tool_calls") and msg.tool_calls:
+        result["tool_calls"] = [
+            {
+                "id": tc.get("id", str(uuid.uuid4())),
+                "name": tc.get("name", ""),
+                "args": tc.get("args", {}),
+            }
+            for tc in msg.tool_calls
+        ]
+    
+    # Handle tool message specifics
+    if msg.type == "tool":
+        result["tool_call_id"] = getattr(msg, "tool_call_id", "")
+        result["name"] = getattr(msg, "name", "")
+    
+    return result
+
+
+def extract_state_from_agent_state(agent_state: dict) -> dict:
+    """Extract todos and files from agent state."""
+    state = create_empty_state()
+    
+    # Extract messages
+    if "messages" in agent_state:
+        state["messages"] = [
+            serialize_message(m) if isinstance(m, BaseMessage) else m
+            for m in agent_state["messages"]
+        ]
+    
+    # Extract todos
+    if "todos" in agent_state:
+        state["todos"] = agent_state["todos"]
+    
+    # Extract files
+    if "files" in agent_state:
+        # Convert FileData to simple content strings for frontend
+        files = {}
+        for path, file_data in agent_state["files"].items():
+            if isinstance(file_data, dict) and "content" in file_data:
+                # FileData format: {"content": [...lines...], ...}
+                files[path] = "\n".join(file_data["content"])
+            elif isinstance(file_data, str):
+                files[path] = file_data
+            else:
+                files[path] = str(file_data)
+        state["files"] = files
+    
+    return state
+
+
+# ============ Health Check ============
 
 @app.get("/ok")
 async def health_check():
@@ -57,7 +159,11 @@ async def health_check():
 @app.get("/info")
 async def get_info():
     """Get server info."""
-    return {"version": "0.1.0"}
+    return {
+        "version": "0.2.0",
+        "sandbox": "local",
+        "features": ["todos", "files", "execute", "subagents"],
+    }
 
 
 # ============ Assistants API ============
@@ -71,7 +177,7 @@ async def list_assistants():
             "graph_id": "agent",
             "name": "Deep Agent",
             "config": {},
-            "metadata": {},
+            "metadata": {"description": "Full-featured deep agent with planning, filesystem, and subagents"},
             "created_at": get_timestamp(),
             "updated_at": get_timestamp(),
         }
@@ -81,17 +187,7 @@ async def list_assistants():
 @app.post("/assistants/search")
 async def search_assistants(request: Request):
     """Search assistants."""
-    return [
-        {
-            "assistant_id": "agent",
-            "graph_id": "agent",
-            "name": "Deep Agent",
-            "config": {},
-            "metadata": {},
-            "created_at": get_timestamp(),
-            "updated_at": get_timestamp(),
-        }
-    ]
+    return await list_assistants()
 
 
 @app.get("/assistants/{assistant_id}")
@@ -99,15 +195,7 @@ async def get_assistant(assistant_id: str):
     """Get assistant by ID."""
     if assistant_id != "agent":
         raise HTTPException(status_code=404, detail="Assistant not found")
-    return {
-        "assistant_id": "agent",
-        "graph_id": "agent",
-        "name": "Deep Agent",
-        "config": {},
-        "metadata": {},
-        "created_at": get_timestamp(),
-        "updated_at": get_timestamp(),
-    }
+    return (await list_assistants())[0]
 
 
 # ============ Threads API ============
@@ -129,7 +217,7 @@ async def create_thread(request: Request):
         "created_at": now,
         "updated_at": now,
         "metadata": body.get("metadata", {}),
-        "values": {"messages": [], "todos": [], "files": {}},
+        "values": create_empty_state(),
     }
     threads[thread_id] = thread
     return thread
@@ -146,7 +234,7 @@ async def get_thread(thread_id: str):
             "created_at": now,
             "updated_at": now,
             "metadata": {},
-            "values": {"messages": [], "todos": [], "files": {}},
+            "values": create_empty_state(),
         }
     return threads[thread_id]
 
@@ -163,6 +251,8 @@ async def search_threads(request: Request):
     limit = body.get("limit", 10)
     offset = body.get("offset", 0)
     all_threads = list(threads.values())
+    # Sort by updated_at descending
+    all_threads.sort(key=lambda t: t.get("updated_at", ""), reverse=True)
     return all_threads[offset:offset + limit]
 
 
@@ -190,7 +280,7 @@ async def get_thread_state(thread_id: str):
     
     thread = threads[thread_id]
     return {
-        "values": thread.get("values", {}),
+        "values": thread.get("values", create_empty_state()),
         "next": [],
         "checkpoint": {
             "thread_id": thread_id,
@@ -213,13 +303,16 @@ async def update_thread_state(thread_id: str, request: Request):
     thread = threads[thread_id]
     
     if "values" in body:
-        thread["values"].update(body["values"])
+        # Deep merge values
+        for key, value in body["values"].items():
+            thread["values"][key] = value
+    
     thread["updated_at"] = get_timestamp()
     
     return {"checkpoint": {"thread_id": thread_id}}
 
 
-# ============ Runs API ============
+# ============ Runs API - Main Streaming Endpoint ============
 
 @app.post("/threads/{thread_id}/runs")
 async def create_run(thread_id: str, request: Request):
@@ -234,7 +327,7 @@ async def create_run(thread_id: str, request: Request):
             "created_at": now,
             "updated_at": now,
             "metadata": {},
-            "values": {"messages": [], "todos": [], "files": {}},
+            "values": create_empty_state(),
         }
     
     run_id = str(uuid.uuid4())
@@ -248,7 +341,16 @@ async def create_run(thread_id: str, request: Request):
 
 @app.post("/threads/{thread_id}/runs/stream")
 async def create_run_stream(thread_id: str, request: Request):
-    """Create a streaming run - main endpoint for chat."""
+    """Create a streaming run - main endpoint for chat.
+    
+    This endpoint streams events in LangGraph format:
+    - event: metadata (run info)
+    - event: values (full state snapshots)
+    - event: updates (per-node updates)
+    - event: messages/partial (streaming message chunks)
+    - event: messages/complete (complete messages)
+    - event: end (stream complete)
+    """
     body = await request.json()
     
     # Ensure thread exists
@@ -260,13 +362,13 @@ async def create_run_stream(thread_id: str, request: Request):
             "created_at": now,
             "updated_at": now,
             "metadata": {"assistant_id": body.get("assistant_id", "agent")},
-            "values": {"messages": [], "todos": [], "files": {}},
+            "values": create_empty_state(),
         }
     
     thread = threads[thread_id]
     input_data = body.get("input", {})
     config = body.get("config", {})
-    stream_mode = body.get("stream_mode", ["messages"])
+    stream_mode = body.get("stream_mode", ["values", "messages"])
     
     # Extract messages from input
     input_messages = input_data.get("messages", [])
@@ -275,54 +377,79 @@ async def create_run_stream(thread_id: str, request: Request):
         """Generate SSE stream in LangGraph format."""
         import traceback
         run_id = str(uuid.uuid4())
+        event_id = 0
+        
+        def make_event(event_type: str, data: Any) -> bytes:
+            nonlocal event_id
+            event_id += 1
+            return f"id: {event_id}\nevent: {event_type}\ndata: {json.dumps(data)}\n\n".encode()
         
         try:
             thread["status"] = "busy"
             print(f"[Stream] Starting run {run_id} for thread {thread_id}")
             print(f"[Stream] Input messages: {input_messages}")
+            print(f"[Stream] Stream modes: {stream_mode}")
             
             # Send metadata event
-            metadata_event = {
+            yield make_event("metadata", {
                 "run_id": run_id,
                 "thread_id": thread_id,
                 "assistant_id": body.get("assistant_id", "agent"),
-            }
-            yield f"event: metadata\ndata: {json.dumps(metadata_event)}\n\n".encode()
+            })
             
-            # Build LangChain messages
+            # Build LangChain messages from input
             messages = []
             for msg in input_messages:
                 content = msg.get("content", "")
                 msg_type = msg.get("type", "human")
+                msg_id = msg.get("id", str(uuid.uuid4()))
+                
                 if msg_type == "human":
-                    messages.append(HumanMessage(content=content))
+                    messages.append(HumanMessage(content=content, id=msg_id))
                 elif msg_type == "ai":
-                    messages.append(AIMessage(content=content))
+                    messages.append(AIMessage(content=content, id=msg_id))
             
             print(f"[Stream] Built {len(messages)} LangChain messages")
             
             if not messages:
                 # No input, just return current state
                 print("[Stream] No messages, returning current state")
-                values_event = {"messages": thread["values"].get("messages", [])}
-                yield f"event: values\ndata: {json.dumps(values_event)}\n\n".encode()
-                yield f"event: end\ndata: null\n\n".encode()
+                yield make_event("values", thread["values"])
+                yield make_event("end", None)
                 thread["status"] = "idle"
                 return
             
-            # Create and run agent
-            print("[Stream] Creating agent...")
-            agent = create_agent()
-            print("[Stream] Agent created successfully")
+            # Add human message to thread state immediately
+            for msg in input_messages:
+                thread["values"]["messages"].append({
+                    "id": msg.get("id", str(uuid.uuid4())),
+                    "type": msg.get("type", "human"),
+                    "content": msg.get("content", ""),
+                })
             
+            # Send initial values with human message
+            yield make_event("values", thread["values"])
+            
+            # Create agent with sandbox backend
+            print("[Stream] Creating agent with sandbox backend...")
+            sandbox = get_sandbox()
+            agent = create_agent(sandbox)
+            print(f"[Stream] Agent created with sandbox at {sandbox.working_dir}")
+            
+            # Configure run
             run_config = {"configurable": {"thread_id": thread_id}}
             if config:
                 run_config["configurable"].update(config.get("configurable", {}))
             
-            # Collect full response
-            full_response = ""
-            tool_calls = []
-            event_count = 0
+            # Track state during execution
+            current_ai_message = {
+                "id": str(uuid.uuid4()),
+                "type": "ai",
+                "content": "",
+                "tool_calls": [],
+            }
+            current_node = None
+            accumulated_content = ""
             
             print("[Stream] Starting agent stream...")
             async for event in agent.astream_events(
@@ -330,86 +457,131 @@ async def create_run_stream(thread_id: str, request: Request):
                 config=run_config,
                 version="v2",
             ):
-                event_count += 1
                 event_type = event.get("event", "")
+                event_name = event.get("name", "")
+                event_data = event.get("data", {})
                 
-                if event_count <= 5 or event_count % 10 == 0:
-                    print(f"[Stream] Event {event_count}: {event_type}")
+                # Track node transitions
+                if event_type == "on_chain_start" and event_name:
+                    if current_node != event_name:
+                        current_node = event_name
+                        print(f"[Stream] Node: {current_node}")
                 
+                # Handle chat model streaming
                 if event_type == "on_chat_model_stream":
-                    chunk = event.get("data", {}).get("chunk")
-                    if chunk and hasattr(chunk, "content"):
-                        content = chunk.content
-                        # Log first few content samples to debug format
-                        if event_count <= 25:
-                            print(f"[Stream] Content type: {type(content)}, value: {repr(content)[:100]}")
-                        
-                        # Handle different content formats
+                    chunk = event_data.get("chunk")
+                    if chunk:
+                        # Extract text content
+                        content = chunk.content if hasattr(chunk, "content") else ""
                         text_content = ""
+                        
                         if isinstance(content, str):
                             text_content = content
                         elif isinstance(content, list):
-                            # Anthropic returns list of content blocks
                             for block in content:
                                 if isinstance(block, dict) and block.get("type") == "text":
                                     text_content += block.get("text", "")
                                 elif isinstance(block, str):
                                     text_content += block
-                                elif hasattr(block, "text"):
-                                    text_content += block.text
-                        elif hasattr(content, "text"):
-                            text_content = content.text
                         
                         if text_content:
-                            full_response += text_content
-                            # Send messages/partial event
-                            msg_event = [{
+                            accumulated_content += text_content
+                            current_ai_message["content"] = accumulated_content
+                            
+                            # Send partial message
+                            yield make_event("messages/partial", [{
+                                "id": current_ai_message["id"],
                                 "type": "ai",
                                 "content": text_content,
-                            }]
-                            yield f"event: messages/partial\ndata: {json.dumps(msg_event)}\n\n".encode()
+                            }])
+                        
+                        # Handle tool calls in chunk
+                        if hasattr(chunk, "tool_calls") and chunk.tool_calls:
+                            for tc in chunk.tool_calls:
+                                tool_call = {
+                                    "id": tc.get("id", str(uuid.uuid4())),
+                                    "name": tc.get("name", ""),
+                                    "args": tc.get("args", {}),
+                                }
+                                current_ai_message["tool_calls"].append(tool_call)
+                                print(f"[Stream] Tool call: {tool_call['name']}")
                 
+                # Handle tool execution
                 elif event_type == "on_tool_start":
                     tool_name = event.get("name", "")
-                    tool_input = event.get("data", {}).get("input", {})
+                    tool_input = event_data.get("input", {})
                     print(f"[Stream] Tool start: {tool_name}")
-                    tool_calls.append({
-                        "name": tool_name,
-                        "args": tool_input,
+                    
+                    # Send update event for tool start
+                    yield make_event("updates", {
+                        "tools": {
+                            "tool_calls": [{
+                                "name": tool_name,
+                                "args": tool_input,
+                                "status": "running",
+                            }]
+                        }
                     })
                 
                 elif event_type == "on_tool_end":
-                    pass  # Tool results handled internally
-            
-            print(f"[Stream] Agent finished. Total events: {event_count}, Response length: {len(full_response)}")
-            
-            # Store the response in thread
-            if full_response:
-                ai_message = {
-                    "id": str(uuid.uuid4()),
-                    "type": "ai",
-                    "content": full_response,
-                }
-                if tool_calls:
-                    ai_message["tool_calls"] = tool_calls
-                
-                # Add user message and AI response to thread
-                for msg in input_messages:
-                    thread["values"]["messages"].append({
-                        "id": msg.get("id", str(uuid.uuid4())),
-                        "type": msg.get("type", "human"),
-                        "content": msg.get("content", ""),
+                    tool_name = event.get("name", "")
+                    tool_output = event_data.get("output", "")
+                    print(f"[Stream] Tool end: {tool_name}")
+                    
+                    # Add tool message to thread
+                    tool_msg = {
+                        "id": str(uuid.uuid4()),
+                        "type": "tool",
+                        "name": tool_name,
+                        "content": str(tool_output)[:1000] if tool_output else "",
+                    }
+                    thread["values"]["messages"].append(tool_msg)
+                    
+                    # Send update event for tool completion
+                    yield make_event("updates", {
+                        "tools": {
+                            "messages": [tool_msg]
+                        }
                     })
-                thread["values"]["messages"].append(ai_message)
-            else:
-                print("[Stream] WARNING: No response generated!")
+                
+                # Handle state updates (todos, files)
+                elif event_type == "on_chain_end":
+                    output = event_data.get("output", {})
+                    if isinstance(output, dict):
+                        # Check for todos update
+                        if "todos" in output:
+                            thread["values"]["todos"] = output["todos"]
+                            print(f"[Stream] Todos updated: {len(output['todos'])} items")
+                            yield make_event("values", thread["values"])
+                        
+                        # Check for files update
+                        if "files" in output:
+                            for path, file_data in output["files"].items():
+                                if isinstance(file_data, dict) and "content" in file_data:
+                                    thread["values"]["files"][path] = "\n".join(file_data["content"])
+                                elif file_data is not None:
+                                    thread["values"]["files"][path] = str(file_data)
+                            print(f"[Stream] Files updated: {list(output['files'].keys())}")
+                            yield make_event("values", thread["values"])
             
-            # Send final values
-            values_event = thread["values"]
-            yield f"event: values\ndata: {json.dumps(values_event)}\n\n".encode()
+            print(f"[Stream] Agent finished. Response length: {len(accumulated_content)}")
+            
+            # Finalize AI message
+            if accumulated_content or current_ai_message["tool_calls"]:
+                # Clean up tool_calls if empty
+                if not current_ai_message["tool_calls"]:
+                    del current_ai_message["tool_calls"]
+                
+                thread["values"]["messages"].append(current_ai_message)
+                
+                # Send complete message
+                yield make_event("messages/complete", [current_ai_message])
+            
+            # Send final state
+            yield make_event("values", thread["values"])
             
             # Send end event
-            yield f"event: end\ndata: null\n\n".encode()
+            yield make_event("end", None)
             
             thread["status"] = "idle"
             thread["updated_at"] = get_timestamp()
@@ -419,8 +591,7 @@ async def create_run_stream(thread_id: str, request: Request):
             print(f"[Stream] ERROR: {str(e)}")
             print(f"[Stream] Traceback: {traceback.format_exc()}")
             thread["status"] = "error"
-            error_event = {"message": str(e)}
-            yield f"event: error\ndata: {json.dumps(error_event)}\n\n".encode()
+            yield make_event("error", {"message": str(e), "code": "AGENT_ERROR"})
     
     return StreamingResponse(
         generate_stream(),
@@ -457,7 +628,7 @@ async def get_thread_history(thread_id: str):
             "checkpoint_ns": "",
             "checkpoint_id": str(uuid.uuid4()),
         },
-        "values": thread.get("values", {}),
+        "values": thread.get("values", create_empty_state()),
         "metadata": thread.get("metadata", {}),
         "created_at": thread.get("created_at"),
     }]

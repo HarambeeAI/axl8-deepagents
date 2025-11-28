@@ -1,36 +1,57 @@
-"""Deep Agent configuration for LangGraph deployment."""
+"""Deep Agent configuration for LangGraph deployment.
+
+This module creates a full-featured deep agent with:
+- Planning (TodoListMiddleware)
+- Filesystem access (ls, read_file, write_file, edit_file, glob, grep)
+- Shell execution (execute) - requires SandboxBackendProtocol
+- Sub-agent delegation (task tool)
+"""
 
 import os
+from typing import Optional
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from deepagents.backends.protocol import SandboxBackendProtocol
 
 # System prompt for the deep agent
 SYSTEM_PROMPT = """You are a helpful AI assistant powered by Deep Agents.
 
 You have access to powerful tools including:
-- File system operations (read, write, edit files)
-- Shell command execution
-- Task planning with todo lists
-- Sub-agent delegation for complex tasks
+- **Planning**: Use `write_todos` to create task lists before complex work
+- **Filesystem**: `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`
+- **Shell execution**: `execute` to run shell commands
+- **Sub-agents**: `task` to delegate complex work to isolated sub-agents
 
-Be thorough, methodical, and helpful. Break down complex tasks into manageable steps.
-Always explain your reasoning and keep the user informed of your progress.
+## Guidelines:
+1. For complex tasks, ALWAYS start by creating a todo list with `write_todos`
+2. Break down work into clear, actionable steps
+3. Use sub-agents for independent, parallelizable work
+4. Keep the user informed of your progress
+5. Be thorough and methodical
+
+## Working Directory:
+Your workspace is at /workspace. All file operations should use paths relative to this.
 """
 
 
-def create_agent():
+def create_agent(backend: Optional[SandboxBackendProtocol] = None):
     """Create and return the deep agent.
     
-    This function is called by LangGraph to instantiate the agent.
-    """
-    # Check if we should use filesystem backend (for local development)
-    use_filesystem = os.getenv("USE_FILESYSTEM_BACKEND", "false").lower() == "true"
-    root_dir = os.getenv("FILESYSTEM_ROOT_DIR", "/tmp/deepagent_workspace")
+    Args:
+        backend: Optional sandbox backend for filesystem and shell execution.
+                If None, uses StateBackend (in-memory, no shell execution).
+                Pass a SandboxBackendProtocol implementation for full features.
     
-    backend = None
-    if use_filesystem:
-        backend = FilesystemBackend(root_dir=root_dir)
+    Returns:
+        Compiled LangGraph agent with all deep agent capabilities.
+    """
+    # Use provided backend or fall back to filesystem/state backend
+    if backend is None:
+        use_filesystem = os.getenv("USE_FILESYSTEM_BACKEND", "false").lower() == "true"
+        if use_filesystem:
+            root_dir = os.getenv("FILESYSTEM_ROOT_DIR", "/tmp/deepagent_workspace")
+            backend = FilesystemBackend(root_dir=root_dir)
+        # If no backend specified and not using filesystem, StateBackend is used by default
     
     agent = create_deep_agent(
         system_prompt=SYSTEM_PROMPT,
@@ -40,5 +61,13 @@ def create_agent():
     return agent
 
 
-# Export the agent graph for LangGraph
-agent = create_agent()
+# For LangGraph CLI compatibility - create default agent
+# Note: This uses StateBackend by default. For shell execution,
+# the server should call create_agent(sandbox) with a proper backend.
+def get_default_agent():
+    """Get the default agent for LangGraph CLI."""
+    return create_agent()
+
+
+# Export for langgraph.json
+agent = get_default_agent()
