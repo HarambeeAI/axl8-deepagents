@@ -29,7 +29,7 @@ from langchain_core.messages import (
 )
 
 from agent import create_agent
-from sandbox import LocalSandbox
+from sandbox import LocalSandbox, ModalSandbox, get_sandbox_backend
 
 # Disable LangSmith tracing to avoid 403 errors
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
@@ -40,54 +40,101 @@ sys.stdout.reconfigure(line_buffering=True)
 
 
 # Global sandbox instance (shared across requests for persistence)
-_sandbox: Optional[LocalSandbox] = None
+# Will be either LocalSandbox or ModalSandbox depending on environment
+_sandbox = None
 
 
-def get_sandbox() -> LocalSandbox:
-    """Get or create the global sandbox instance."""
+def get_sandbox():
+    """Get or create the global sandbox instance.
+    
+    Auto-detects sandbox type based on environment:
+    - If MODAL_TOKEN_ID and MODAL_TOKEN_SECRET are set, uses Modal
+    - Otherwise, uses local subprocess sandbox
+    """
     global _sandbox
     if _sandbox is None:
-        workspace_dir = os.getenv("SANDBOX_WORKSPACE", "/workspace")
-        _sandbox = LocalSandbox(working_dir=workspace_dir)
+        _sandbox = get_sandbox_backend()
     return _sandbox
 
 
-def sync_sandbox_files_to_state(sandbox: LocalSandbox, thread_state: dict) -> bool:
+def sync_sandbox_files_to_state(sandbox, thread_state: dict) -> bool:
     """Sync files from sandbox filesystem to thread state.
     
+    Works with both LocalSandbox and ModalSandbox.
     Returns True if files were updated.
     """
     updated = False
-    workspace = sandbox.working_dir
     
-    # Walk the workspace and read all files
-    for root, dirs, files in os.walk(workspace):
-        # Skip hidden directories
-        dirs[:] = [d for d in dirs if not d.startswith('.')]
+    # For LocalSandbox, we can walk the filesystem directly
+    if isinstance(sandbox, LocalSandbox):
+        workspace = sandbox.working_dir
         
-        for filename in files:
-            if filename.startswith('.'):
-                continue
-                
-            full_path = Path(root) / filename
-            rel_path = "/" + str(full_path.relative_to(workspace))
+        # Walk the workspace and read all files
+        for root, dirs, files in os.walk(workspace):
+            # Skip hidden directories
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
             
-            try:
-                # Only read text files under 100KB
-                if full_path.stat().st_size > 100000:
+            for filename in files:
+                if filename.startswith('.'):
                     continue
                     
-                content = full_path.read_text(errors='ignore')
+                full_path = Path(root) / filename
+                rel_path = "/" + str(full_path.relative_to(workspace))
                 
-                # Check if file is new or changed
-                if rel_path not in thread_state.get("files", {}) or \
-                   thread_state["files"].get(rel_path) != content:
-                    if "files" not in thread_state:
-                        thread_state["files"] = {}
-                    thread_state["files"][rel_path] = content
-                    updated = True
-            except Exception:
-                pass
+                try:
+                    # Only read text files under 100KB
+                    if full_path.stat().st_size > 100000:
+                        continue
+                        
+                    content = full_path.read_text(errors='ignore')
+                    
+                    # Check if file is new or changed
+                    if rel_path not in thread_state.get("files", {}) or \
+                       thread_state["files"].get(rel_path) != content:
+                        if "files" not in thread_state:
+                            thread_state["files"] = {}
+                        thread_state["files"][rel_path] = content
+                        updated = True
+                except Exception:
+                    pass
+    
+    # For ModalSandbox, use ls + download_files
+    elif isinstance(sandbox, ModalSandbox):
+        try:
+            # List files in workspace
+            result = sandbox.execute("find /workspace -type f -size -100k 2>/dev/null | head -50")
+            if result.exit_code == 0 and result.output:
+                file_paths = [p.strip() for p in result.output.strip().split('\n') if p.strip()]
+                
+                # Filter out hidden files
+                file_paths = [p for p in file_paths if not any(
+                    part.startswith('.') for part in p.split('/')
+                )]
+                
+                if file_paths:
+                    # Download files
+                    responses = sandbox.download_files(file_paths)
+                    
+                    for resp in responses:
+                        if resp.error is None and resp.content is not None:
+                            # Convert path to relative
+                            rel_path = resp.path.replace("/workspace", "") or "/"
+                            if not rel_path.startswith("/"):
+                                rel_path = "/" + rel_path
+                            
+                            try:
+                                content = resp.content.decode('utf-8', errors='ignore')
+                                
+                                if rel_path not in thread_state.get("files", {}) or \
+                                   thread_state["files"].get(rel_path) != content:
+                                    if "files" not in thread_state:
+                                        thread_state["files"] = {}
+                                    thread_state["files"][rel_path] = content
+                                    updated = True
+                            except Exception:
+                                pass
+        except Exception as e:
+            print(f"[Modal] Error syncing files: {e}")
     
     return updated
 
