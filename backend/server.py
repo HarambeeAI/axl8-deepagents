@@ -498,6 +498,8 @@ async def create_run_stream(thread_id: str, request: Request):
             }
             current_node = None
             accumulated_content = ""
+            # Track tool call IDs for matching tool results
+            pending_tool_calls: dict[str, dict] = {}  # tool_call_id -> {name, args}
             
             print("[Stream] Starting agent stream...")
             async for event in agent.astream_events(
@@ -548,19 +550,44 @@ async def create_run_stream(thread_id: str, request: Request):
                         # Handle tool calls in chunk
                         if hasattr(chunk, "tool_calls") and chunk.tool_calls:
                             for tc in chunk.tool_calls:
-                                tool_call = {
-                                    "id": tc.get("id", str(uuid.uuid4())),
-                                    "name": tc.get("name", ""),
-                                    "args": tc.get("args", {}),
-                                }
-                                current_ai_message["tool_calls"].append(tool_call)
-                                print(f"[Stream] Tool call: {tool_call['name']}")
+                                tc_id = tc.get("id") or str(uuid.uuid4())
+                                tc_name = tc.get("name", "")
+                                tc_args = tc.get("args", {})
+                                
+                                # Only add if we have a name (skip partial chunks)
+                                if tc_name:
+                                    tool_call = {
+                                        "id": tc_id,
+                                        "name": tc_name,
+                                        "args": tc_args,
+                                    }
+                                    # Check if already added
+                                    if tc_id not in pending_tool_calls:
+                                        current_ai_message["tool_calls"].append(tool_call)
+                                        pending_tool_calls[tc_id] = tool_call
+                                        print(f"[Stream] Tool call added: {tc_name} (id={tc_id})", flush=True)
                 
                 # Handle tool execution
                 elif event_type == "on_tool_start":
                     tool_name = event.get("name", "")
                     tool_input = event_data.get("input", {})
-                    print(f"[Stream] Tool start: {tool_name}")
+                    print(f"[Stream] Tool start: {tool_name}", flush=True)
+                    
+                    # If we have accumulated content or tool calls, send the AI message first
+                    if accumulated_content or current_ai_message["tool_calls"]:
+                        ai_msg_to_send = {
+                            "id": current_ai_message["id"],
+                            "type": "ai",
+                            "content": accumulated_content,
+                        }
+                        if current_ai_message["tool_calls"]:
+                            ai_msg_to_send["tool_calls"] = current_ai_message["tool_calls"]
+                        
+                        # Add to thread state if not already there
+                        if not any(m.get("id") == current_ai_message["id"] for m in thread["values"]["messages"]):
+                            thread["values"]["messages"].append(ai_msg_to_send)
+                            yield make_event("values", thread["values"])
+                            await asyncio.sleep(0)
                     
                     # Send update event for tool start
                     yield make_event("updates", {
@@ -577,16 +604,41 @@ async def create_run_stream(thread_id: str, request: Request):
                 elif event_type == "on_tool_end":
                     tool_name = event.get("name", "")
                     tool_output = event_data.get("output", "")
+                    run_id = event.get("run_id", "")
                     print(f"[Stream] Tool end: {tool_name}", flush=True)
                     
-                    # Add tool message to thread
+                    # Find the tool_call_id for this tool
+                    tool_call_id = None
+                    for tc_id, tc_info in pending_tool_calls.items():
+                        if tc_info.get("name") == tool_name:
+                            tool_call_id = tc_id
+                            break
+                    
+                    # Add tool message to thread with tool_call_id
                     tool_msg = {
                         "id": str(uuid.uuid4()),
                         "type": "tool",
                         "name": tool_name,
-                        "content": str(tool_output)[:1000] if tool_output else "",
+                        "content": str(tool_output)[:2000] if tool_output else "",
                     }
+                    if tool_call_id:
+                        tool_msg["tool_call_id"] = tool_call_id
+                    
                     thread["values"]["messages"].append(tool_msg)
+                    
+                    # Handle write_todos output - extract todos from tool output
+                    if tool_name == "write_todos" and tool_output:
+                        try:
+                            # The tool output might contain the todos
+                            if isinstance(tool_output, dict) and "todos" in tool_output:
+                                thread["values"]["todos"] = tool_output["todos"]
+                            elif isinstance(tool_output, list):
+                                thread["values"]["todos"] = tool_output
+                            print(f"[Stream] Todos from tool: {len(thread['values'].get('todos', []))} items", flush=True)
+                            yield make_event("values", thread["values"])
+                            await asyncio.sleep(0)
+                        except Exception as e:
+                            print(f"[Stream] Error parsing todos: {e}", flush=True)
                     
                     # Send update event for tool completion
                     yield make_event("updates", {
