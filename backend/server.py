@@ -536,11 +536,12 @@ async def create_run_stream(thread_id: str, request: Request):
                             accumulated_content += text_content
                             current_ai_message["content"] = accumulated_content
                             
-                            # Send partial message
-                            yield make_event("messages/partial", [{
+                            # Send message chunk in LangGraph SDK format
+                            # Format: [{content: [{text: "...", type: "text"}], type: "AIMessageChunk", id: "..."}]
+                            yield make_event("messages", [{
+                                "content": [{"text": text_content, "type": "text"}],
+                                "type": "AIMessageChunk",
                                 "id": current_ai_message["id"],
-                                "type": "ai",
-                                "content": text_content,
                             }])
                             await asyncio.sleep(0)  # Flush for real-time streaming
                         
@@ -623,7 +624,7 @@ async def create_run_stream(thread_id: str, request: Request):
                             print(f"[Stream] Files updated: {list(output['files'].keys())}")
                             yield make_event("values", thread["values"])
             
-            print(f"[Stream] Agent finished. Response length: {len(accumulated_content)}")
+            print(f"[Stream] Agent finished. Response length: {len(accumulated_content)}", flush=True)
             
             # Finalize AI message
             if accumulated_content or current_ai_message["tool_calls"]:
@@ -631,16 +632,23 @@ async def create_run_stream(thread_id: str, request: Request):
                 if not current_ai_message["tool_calls"]:
                     del current_ai_message["tool_calls"]
                 
-                thread["values"]["messages"].append(current_ai_message)
+                # Add final AI message to thread state
+                final_ai_msg = {
+                    "id": current_ai_message["id"],
+                    "type": "ai",
+                    "content": accumulated_content,
+                }
+                if current_ai_message.get("tool_calls"):
+                    final_ai_msg["tool_calls"] = current_ai_message["tool_calls"]
                 
-                # Send complete message
-                yield make_event("messages/complete", [current_ai_message])
+                thread["values"]["messages"].append(final_ai_msg)
             
-            # Send final state
+            # Send final state with all messages
             yield make_event("values", thread["values"])
+            await asyncio.sleep(0)
             
-            # Send end event
-            yield make_event("end", None)
+            # Send end event (no data needed)
+            yield make_event("end", {})
             
             thread["status"] = "idle"
             thread["updated_at"] = get_timestamp()
