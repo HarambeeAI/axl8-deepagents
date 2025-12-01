@@ -9,16 +9,92 @@ import React, {
 } from "react";
 import {
   FileText,
+  FileSpreadsheet,
+  FileImage,
+  File,
   CheckCircle,
   Circle,
   Clock,
   ChevronDown,
+  Download,
 } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { TodoItem, FileItem } from "@/app/types/types";
 import { useChatContext } from "@/providers/ChatProvider";
 import { cn } from "@/lib/utils";
 import { FileViewDialog } from "@/app/components/FileViewDialog";
+
+// Binary file type definition
+interface BinaryFileData {
+  content: string;
+  is_binary: boolean;
+  content_base64: string;
+  content_type: string;
+  size: number;
+}
+
+// Helper to check if file data is binary
+function isBinaryFile(fileData: unknown): fileData is BinaryFileData {
+  return (
+    typeof fileData === "object" &&
+    fileData !== null &&
+    "is_binary" in fileData &&
+    (fileData as BinaryFileData).is_binary === true
+  );
+}
+
+// Helper to get file icon based on extension
+function getFileIcon(filePath: string, isBinary: boolean) {
+  const ext = filePath.split(".").pop()?.toLowerCase() || "";
+  
+  if (isBinary) {
+    switch (ext) {
+      case "xlsx":
+      case "xls":
+        return <FileSpreadsheet size={24} className="mx-auto text-green-600" />;
+      case "pptx":
+      case "ppt":
+        return <FileImage size={24} className="mx-auto text-orange-500" />;
+      case "pdf":
+        return <File size={24} className="mx-auto text-red-500" />;
+      case "docx":
+      case "doc":
+        return <FileText size={24} className="mx-auto text-blue-500" />;
+      default:
+        return <File size={24} className="mx-auto text-muted-foreground" />;
+    }
+  }
+  
+  return <FileText size={24} className="mx-auto text-muted-foreground" />;
+}
+
+// Helper to download binary file
+function downloadBinaryFile(filePath: string, fileData: BinaryFileData) {
+  const fileName = filePath.split("/").pop() || "download";
+  const byteCharacters = atob(fileData.content_base64);
+  const byteNumbers = new Array(byteCharacters.length);
+  for (let i = 0; i < byteCharacters.length; i++) {
+    byteNumbers[i] = byteCharacters.charCodeAt(i);
+  }
+  const byteArray = new Uint8Array(byteNumbers);
+  const blob = new Blob([byteArray], { type: fileData.content_type });
+  
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// Format file size
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 export function FilesPopover({
   files,
@@ -50,8 +126,13 @@ export function FilesPopover({
           {Object.keys(files).map((file) => {
             const filePath = String(file);
             const rawContent = files[file];
+            const isBinary = isBinaryFile(rawContent);
+            
             let fileContent: string;
-            if (
+            if (isBinary) {
+              // Binary file - show placeholder content
+              fileContent = rawContent.content || `[Binary file - ${formatFileSize(rawContent.size)}]`;
+            } else if (
               typeof rawContent === "object" &&
               rawContent !== null &&
               "content" in rawContent
@@ -67,13 +148,9 @@ export function FilesPopover({
             }
 
             return (
-              <button
+              <div
                 key={filePath}
-                type="button"
-                onClick={() =>
-                  setSelectedFile({ path: filePath, content: fileContent })
-                }
-                className="cursor-pointer space-y-1 truncate rounded-md border border-border px-2 py-3 shadow-sm transition-colors"
+                className="relative cursor-pointer space-y-1 truncate rounded-md border border-border px-2 py-3 shadow-sm transition-colors"
                 style={{
                   backgroundColor: "var(--color-file-button)",
                 }}
@@ -86,14 +163,46 @@ export function FilesPopover({
                     "var(--color-file-button)";
                 }}
               >
-                <FileText
-                  size={24}
-                  className="mx-auto text-muted-foreground"
-                />
-                <span className="mx-auto block w-full truncate break-words text-center text-sm leading-relaxed text-foreground">
-                  {filePath}
-                </span>
-              </button>
+                {/* File icon and name - clickable for text files */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isBinary) {
+                      // For binary files, download directly
+                      downloadBinaryFile(filePath, rawContent as BinaryFileData);
+                    } else {
+                      // For text files, open viewer
+                      setSelectedFile({ path: filePath, content: fileContent });
+                    }
+                  }}
+                  className="w-full"
+                >
+                  {getFileIcon(filePath, isBinary)}
+                  <span className="mx-auto block w-full truncate break-words text-center text-sm leading-relaxed text-foreground">
+                    {filePath.split("/").pop()}
+                  </span>
+                  {isBinary && (
+                    <span className="mx-auto block text-xs text-muted-foreground">
+                      {formatFileSize((rawContent as BinaryFileData).size)}
+                    </span>
+                  )}
+                </button>
+                
+                {/* Download button for binary files */}
+                {isBinary && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      downloadBinaryFile(filePath, rawContent as BinaryFileData);
+                    }}
+                    className="absolute right-1 top-1 rounded-full bg-primary/10 p-1.5 text-primary hover:bg-primary/20"
+                    title="Download file"
+                  >
+                    <Download size={14} />
+                  </button>
+                )}
+              </div>
             );
           })}
         </div>
