@@ -23,6 +23,7 @@ import type { TodoItem, FileItem } from "@/app/types/types";
 import { useChatContext } from "@/providers/ChatProvider";
 import { cn } from "@/lib/utils";
 import { FileViewDialog } from "@/app/components/FileViewDialog";
+import { BinaryFileDialog } from "@/app/components/BinaryFileDialog";
 
 // Binary file type definition
 interface BinaryFileData {
@@ -96,6 +97,12 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// Selected binary file state type
+interface SelectedBinaryFile {
+  path: string;
+  data: BinaryFileData;
+}
+
 export function FilesPopover({
   files,
   setFiles,
@@ -106,6 +113,7 @@ export function FilesPopover({
   editDisabled: boolean;
 }) {
   const [selectedFile, setSelectedFile] = useState<FileItem | null>(null);
+  const [selectedBinaryFile, setSelectedBinaryFile] = useState<SelectedBinaryFile | null>(null);
 
   const handleSaveFile = useCallback(
     async (fileName: string, content: string) => {
@@ -163,13 +171,13 @@ export function FilesPopover({
                     "var(--color-file-button)";
                 }}
               >
-                {/* File icon and name - clickable for text files */}
+                {/* File icon and name - clickable */}
                 <button
                   type="button"
                   onClick={() => {
                     if (isBinary) {
-                      // For binary files, download directly
-                      downloadBinaryFile(filePath, rawContent as BinaryFileData);
+                      // For binary files, open preview dialog
+                      setSelectedBinaryFile({ path: filePath, data: rawContent as BinaryFileData });
                     } else {
                       // For text files, open viewer
                       setSelectedFile({ path: filePath, content: fileContent });
@@ -208,12 +216,22 @@ export function FilesPopover({
         </div>
       )}
 
+      {/* Text file viewer dialog */}
       {selectedFile && (
         <FileViewDialog
           file={selectedFile}
           onSaveFile={handleSaveFile}
           onClose={() => setSelectedFile(null)}
           editDisabled={editDisabled}
+        />
+      )}
+
+      {/* Binary file preview dialog */}
+      {selectedBinaryFile && (
+        <BinaryFileDialog
+          filePath={selectedBinaryFile.path}
+          fileData={selectedBinaryFile.data}
+          onClose={() => setSelectedBinaryFile(null)}
         />
       )}
     </>
