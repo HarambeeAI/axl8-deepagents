@@ -237,11 +237,25 @@ def extract_state_from_agent_state(agent_state: dict) -> dict:
     # Extract files
     if "files" in agent_state:
         # Convert FileData to simple content strings for frontend
+        # Also handle binary files from Claude Skills
         files = {}
         for path, file_data in agent_state["files"].items():
-            if isinstance(file_data, dict) and "content" in file_data:
-                # FileData format: {"content": [...lines...], ...}
-                files[path] = "\n".join(file_data["content"])
+            if isinstance(file_data, dict):
+                # Check if it's a binary file from Skills
+                if file_data.get("is_binary") and file_data.get("content_base64"):
+                    # For binary files, include metadata for download
+                    files[path] = {
+                        "content": file_data.get("content", ["[Binary file]"])[0] if file_data.get("content") else "[Binary file]",
+                        "is_binary": True,
+                        "content_base64": file_data["content_base64"],
+                        "content_type": file_data.get("content_type", "application/octet-stream"),
+                        "size": file_data.get("size", 0),
+                    }
+                elif "content" in file_data:
+                    # FileData format: {"content": [...lines...], ...}
+                    files[path] = "\n".join(file_data["content"])
+                else:
+                    files[path] = str(file_data)
             elif isinstance(file_data, str):
                 files[path] = file_data
             else:
@@ -262,10 +276,22 @@ async def health_check():
 @app.get("/info")
 async def get_info():
     """Get server info."""
+    features = ["todos", "files", "execute", "subagents"]
+    
+    # Check if Skills are available
+    from skills import get_skills_client
+    skills_client = get_skills_client()
+    if skills_client:
+        features.append("document_generation")
+        # Don't forget to close the client
+        import asyncio
+        asyncio.create_task(skills_client.close())
+    
     return {
         "version": "0.2.0",
         "sandbox": "local",
-        "features": ["todos", "files", "execute", "subagents"],
+        "features": features,
+        "skills_available": skills_client is not None,
     }
 
 
