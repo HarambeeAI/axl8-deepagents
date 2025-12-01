@@ -13,6 +13,7 @@ import os
 import uuid
 import asyncio
 import sys
+import httpx
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Optional
@@ -30,6 +31,12 @@ from langchain_core.messages import (
 
 from agent import create_agent
 from sandbox import LocalSandbox, ModalSandbox, get_sandbox_backend
+from skills import (
+    get_skills_client,
+    SKILLS_SYSTEM_PROMPT,
+    is_document_generation_request,
+    SkillType,
+)
 
 # Disable LangSmith tracing to avoid 403 errors
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
@@ -896,6 +903,168 @@ async def get_thread_history(thread_id: str):
         "metadata": thread.get("metadata", {}),
         "created_at": thread.get("created_at"),
     }]
+
+
+# =============================================================================
+# CLAUDE SKILLS ENDPOINTS
+# =============================================================================
+
+@app.post("/skills/generate")
+async def skills_generate(request: Request):
+    """Generate documents using Claude Skills.
+    
+    This endpoint uses Claude's native document generation skills (xlsx, pptx, pdf, docx)
+    to create professional documents based on user requests.
+    
+    Request body:
+    {
+        "messages": [{"role": "user", "content": "Create a spreadsheet..."}],
+        "thread_id": "optional-thread-id",
+        "system_prompt": "optional custom system prompt"
+    }
+    
+    Returns SSE stream with:
+    - content_block_* events (Claude's response)
+    - file_ready events (generated documents with base64 content)
+    """
+    body = await request.json()
+    messages = body.get("messages", [])
+    thread_id = body.get("thread_id", str(uuid.uuid4()))
+    system_prompt = body.get("system_prompt", SKILLS_SYSTEM_PROMPT)
+    
+    if not messages:
+        raise HTTPException(status_code=400, detail="No messages provided")
+    
+    # Get skills client
+    skills_client = get_skills_client()
+    if not skills_client:
+        raise HTTPException(
+            status_code=503,
+            detail="Claude Skills not available - ANTHROPIC_API_KEY not configured"
+        )
+    
+    # Convert messages to Anthropic format
+    anthropic_messages = []
+    for msg in messages:
+        role = msg.get("role") or msg.get("type", "user")
+        content = msg.get("content", "")
+        
+        # Map our types to Anthropic roles
+        if role in ("human", "user"):
+            role = "user"
+        elif role in ("ai", "assistant"):
+            role = "assistant"
+        
+        anthropic_messages.append({"role": role, "content": content})
+    
+    async def generate_stream():
+        """Stream skills generation events."""
+        try:
+            print(f"[Skills] Starting generation for thread {thread_id}")
+            
+            # Track generated files
+            generated_files = []
+            accumulated_text = ""
+            
+            async for event in skills_client.generate_with_skills(
+                anthropic_messages,
+                system_prompt=system_prompt,
+            ):
+                event_type = event.get("type", event.get("_event_type", ""))
+                
+                # Handle file_ready events (our custom event)
+                if event_type == "file_ready":
+                    generated_files.append({
+                        "file_id": event.get("file_id"),
+                        "file_name": event.get("file_name"),
+                        "skill": event.get("skill"),
+                        "size": event.get("size"),
+                    })
+                    
+                    # Send file_ready event to frontend
+                    yield f"event: file_ready\ndata: {json.dumps(event)}\n\n"
+                    continue
+                
+                # Handle file_error events
+                if event_type == "file_error":
+                    yield f"event: file_error\ndata: {json.dumps(event)}\n\n"
+                    continue
+                
+                # Handle text content
+                if event_type == "content_block_delta":
+                    delta = event.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
+                        accumulated_text += text
+                        yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
+                
+                # Handle message completion
+                if event_type == "message_stop":
+                    yield f"event: message_complete\ndata: {json.dumps({'text': accumulated_text, 'files': generated_files})}\n\n"
+                
+                # Forward other events for debugging/transparency
+                if event_type in ("message_start", "content_block_start", "content_block_stop"):
+                    yield f"event: {event_type}\ndata: {json.dumps(event)}\n\n"
+            
+            # Send final summary
+            yield f"event: done\ndata: {json.dumps({'thread_id': thread_id, 'files_generated': len(generated_files)})}\n\n"
+            
+            print(f"[Skills] Generation complete: {len(generated_files)} files generated")
+            
+        except httpx.HTTPStatusError as e:
+            error_msg = f"Claude API error: {e.response.status_code}"
+            print(f"[Skills] Error: {error_msg}")
+            yield f"event: error\ndata: {json.dumps({'error': error_msg})}\n\n"
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[Skills] Error: {error_msg}")
+            yield f"event: error\ndata: {json.dumps({'error': error_msg})}\n\n"
+        finally:
+            await skills_client.close()
+    
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/skills/status")
+async def skills_status():
+    """Check if Claude Skills are available."""
+    client = get_skills_client()
+    available = client is not None
+    
+    if client:
+        await client.close()
+    
+    return {
+        "available": available,
+        "skills": [s.value for s in SkillType] if available else [],
+        "message": "Claude Skills ready" if available else "ANTHROPIC_API_KEY not configured",
+    }
+
+
+@app.post("/skills/detect")
+async def skills_detect(request: Request):
+    """Detect if a message should use Claude Skills.
+    
+    This endpoint helps the frontend decide whether to route
+    a request to the skills endpoint or the regular agent.
+    """
+    body = await request.json()
+    message = body.get("message", "")
+    
+    should_use_skills = is_document_generation_request(message)
+    
+    return {
+        "use_skills": should_use_skills,
+        "message": message[:100] + "..." if len(message) > 100 else message,
+    }
 
 
 if __name__ == "__main__":
