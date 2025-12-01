@@ -658,24 +658,45 @@ async def create_run_stream(thread_id: str, request: Request):
                             await asyncio.sleep(0)  # Flush for real-time streaming
                         
                         # Handle tool calls in chunk
+                        # Check both tool_calls (complete) and tool_call_chunks (streaming)
+                        tool_calls_to_process = []
+                        
                         if hasattr(chunk, "tool_calls") and chunk.tool_calls:
-                            for tc in chunk.tool_calls:
-                                tc_id = tc.get("id") or str(uuid.uuid4())
+                            tool_calls_to_process.extend(chunk.tool_calls)
+                        
+                        # Also check tool_call_chunks for streaming tool calls
+                        if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
+                            tool_calls_to_process.extend(chunk.tool_call_chunks)
+                        
+                        # Also check additional_kwargs for Anthropic format
+                        if hasattr(chunk, "additional_kwargs"):
+                            ak = chunk.additional_kwargs
+                            if ak.get("tool_calls"):
+                                tool_calls_to_process.extend(ak["tool_calls"])
+                        
+                        for tc in tool_calls_to_process:
+                            # Handle both dict and object formats
+                            if hasattr(tc, "get"):
+                                tc_id = tc.get("id") or tc.get("index") or str(uuid.uuid4())
                                 tc_name = tc.get("name", "")
                                 tc_args = tc.get("args", {})
-                                
-                                # Only add if we have a name (skip partial chunks)
-                                if tc_name:
-                                    tool_call = {
-                                        "id": tc_id,
-                                        "name": tc_name,
-                                        "args": tc_args,
-                                    }
-                                    # Check if already added
-                                    if tc_id not in pending_tool_calls:
-                                        current_ai_message["tool_calls"].append(tool_call)
-                                        pending_tool_calls[tc_id] = tool_call
-                                        print(f"[Stream] Tool call added: {tc_name} (id={tc_id})", flush=True)
+                            else:
+                                tc_id = getattr(tc, "id", None) or getattr(tc, "index", None) or str(uuid.uuid4())
+                                tc_name = getattr(tc, "name", "")
+                                tc_args = getattr(tc, "args", {})
+                            
+                            # Only add if we have a name (skip partial chunks)
+                            if tc_name:
+                                tool_call = {
+                                    "id": str(tc_id),
+                                    "name": tc_name,
+                                    "args": tc_args if isinstance(tc_args, dict) else {},
+                                }
+                                # Check if already added
+                                if tool_call["id"] not in pending_tool_calls:
+                                    current_ai_message["tool_calls"].append(tool_call)
+                                    pending_tool_calls[tool_call["id"]] = tool_call
+                                    print(f"[Stream] Tool call added: {tc_name} (id={tool_call['id']})", flush=True)
                 
                 # Handle tool execution (main agent tools only, not subagent internal tools)
                 elif event_type == "on_tool_start" and not is_subagent_event:
