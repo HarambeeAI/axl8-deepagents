@@ -43,7 +43,7 @@ DEFAULT_READ_OFFSET = 0
 DEFAULT_READ_LIMIT = 500
 
 
-class FileData(TypedDict):
+class FileData(TypedDict, total=False):
     """Data structure for storing file contents with metadata."""
 
     content: list[str]
@@ -54,6 +54,19 @@ class FileData(TypedDict):
 
     modified_at: str
     """ISO 8601 timestamp of last modification."""
+    
+    # Binary file support (for Claude Skills generated documents)
+    is_binary: bool
+    """Whether this is a binary file."""
+    
+    content_base64: str
+    """Base64 encoded content for binary files."""
+    
+    content_type: str
+    """MIME type of the file."""
+    
+    size: int
+    """Size of the file in bytes."""
 
 
 def _file_data_reducer(left: dict[str, FileData] | None, right: dict[str, FileData | None]) -> dict[str, FileData]:

@@ -240,7 +240,10 @@ def extract_state_from_agent_state(agent_state: dict) -> dict:
         # Also handle binary files from Claude Skills
         files = {}
         for path, file_data in agent_state["files"].items():
+            print(f"[Files] Processing {path}: type={type(file_data)}, is_dict={isinstance(file_data, dict)}")
             if isinstance(file_data, dict):
+                print(f"[Files] Dict keys: {file_data.keys()}")
+                print(f"[Files] is_binary={file_data.get('is_binary')}, has_base64={bool(file_data.get('content_base64'))}")
                 # Check if it's a binary file from Skills
                 if file_data.get("is_binary") and file_data.get("content_base64"):
                     # For binary files, include metadata for download
@@ -251,15 +254,20 @@ def extract_state_from_agent_state(agent_state: dict) -> dict:
                         "content_type": file_data.get("content_type", "application/octet-stream"),
                         "size": file_data.get("size", 0),
                     }
+                    print(f"[Files] Binary file detected, preserving metadata")
                 elif "content" in file_data:
                     # FileData format: {"content": [...lines...], ...}
                     files[path] = "\n".join(file_data["content"])
+                    print(f"[Files] Text file with content array")
                 else:
                     files[path] = str(file_data)
+                    print(f"[Files] Unknown dict format, converting to string")
             elif isinstance(file_data, str):
                 files[path] = file_data
+                print(f"[Files] Already a string")
             else:
                 files[path] = str(file_data)
+                print(f"[Files] Other type, converting to string")
         state["files"] = files
     
     return state
