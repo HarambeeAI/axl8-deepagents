@@ -271,18 +271,15 @@ class SkillsMiddleware(AgentMiddleware):
             system_prompt: Additional system prompt text to append.
             workspace_path: Base path for saving generated documents.
         """
-        self.system_prompt = system_prompt
+        self._custom_system_prompt = system_prompt
         self.workspace_path = workspace_path
+        
+        # Create and store the tools - this is required by the middleware interface
+        self.tools = self._create_tools()
+        print(f"[SkillsMiddleware] Initialized with {len(self.tools)} tools: {[t.name for t in self.tools]}")
     
-    def get_system_prompt(self) -> str:
-        """Return the system prompt for document generation."""
-        prompt = SKILLS_SYSTEM_PROMPT
-        if self.system_prompt:
-            prompt += f"\n\n{self.system_prompt}"
-        return prompt
-    
-    def get_tools(self) -> List:
-        """Return the document generation tools."""
+    def _create_tools(self) -> List:
+        """Create the document generation tools."""
         workspace_path = self.workspace_path
         
         @tool(description=CREATE_DOCUMENT_DESCRIPTION)
@@ -293,15 +290,72 @@ class SkillsMiddleware(AgentMiddleware):
             runtime: ToolRuntime,
         ) -> str:
             """Create a professional document using Claude Skills."""
-            return _create_document_sync(
+            print(f"[Skills] create_document called: type={document_type}, filename={filename}")
+            result = _create_document_sync(
                 document_type=document_type,
                 filename=filename,
                 description=description,
                 runtime=runtime,
                 workspace_path=workspace_path,
             )
+            print(f"[Skills] create_document result type: {type(result)}")
+            return result
         
         return [create_document]
+    
+    def wrap_model_call(
+        self,
+        request,
+        handler,
+    ):
+        """Update the system prompt to include document generation instructions.
+        
+        Args:
+            request: The model request being processed.
+            handler: The handler function to call with the modified request.
+            
+        Returns:
+            The model response from the handler.
+        """
+        # Build system prompt
+        system_prompt = SKILLS_SYSTEM_PROMPT
+        if self._custom_system_prompt:
+            system_prompt += f"\n\n{self._custom_system_prompt}"
+        
+        # Append to existing system prompt
+        if system_prompt:
+            existing_prompt = request.system_prompt or ""
+            new_prompt = f"{existing_prompt}\n\n{system_prompt}" if existing_prompt else system_prompt
+            request = request.override(system_prompt=new_prompt)
+        
+        return handler(request)
+    
+    async def awrap_model_call(
+        self,
+        request,
+        handler,
+    ):
+        """(async) Update the system prompt to include document generation instructions.
+        
+        Args:
+            request: The model request being processed.
+            handler: The handler function to call with the modified request.
+            
+        Returns:
+            The model response from the handler.
+        """
+        # Build system prompt
+        system_prompt = SKILLS_SYSTEM_PROMPT
+        if self._custom_system_prompt:
+            system_prompt += f"\n\n{self._custom_system_prompt}"
+        
+        # Append to existing system prompt
+        if system_prompt:
+            existing_prompt = request.system_prompt or ""
+            new_prompt = f"{existing_prompt}\n\n{system_prompt}" if existing_prompt else system_prompt
+            request = request.override(system_prompt=new_prompt)
+        
+        return await handler(request)
 
 
 def _create_document_sync(
