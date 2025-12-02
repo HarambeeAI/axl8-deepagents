@@ -24,15 +24,7 @@ import { useChatContext } from "@/providers/ChatProvider";
 import { cn } from "@/lib/utils";
 import { FileViewDialog } from "@/app/components/FileViewDialog";
 import { BinaryFileDialog } from "@/app/components/BinaryFileDialog";
-
-// Binary file type definition
-interface BinaryFileData {
-  content: string;
-  is_binary: boolean;
-  content_base64: string;
-  content_type: string;
-  size: number;
-}
+import type { BinaryFileData, FileValue } from "@/app/hooks/useChat";
 
 // Helper to check if file data is binary
 function isBinaryFile(fileData: unknown): fileData is BinaryFileData {
@@ -112,9 +104,6 @@ interface SelectedBinaryFile {
   path: string;
   data: BinaryFileData;
 }
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type FileValue = string | BinaryFileData | { content: string[] } | any;
 
 export function FilesPopover({
   files,

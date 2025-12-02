@@ -14,10 +14,23 @@ import { useClient } from "@/providers/ClientProvider";
 import { HumanResponse } from "@/app/types/inbox";
 import { useQueryState } from "nuqs";
 
+// Binary file data from Claude Skills
+export interface BinaryFileData {
+  content: string;
+  is_binary: boolean;
+  content_base64: string;
+  content_type: string;
+  size: number;
+}
+
+// File value can be a string (text file) or BinaryFileData (binary file)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type FileValue = string | BinaryFileData | { content: string[] } | any;
+
 export type StateType = {
   messages: Message[];
   todos: TodoItem[];
-  files: Record<string, string>;
+  files: Record<string, FileValue>;
   email?: {
     id?: string;
     subject?: string;
@@ -99,7 +112,7 @@ export function useChat({
   );
 
   const setFiles = useCallback(
-    async (files: Record<string, string>) => {
+    async (files: Record<string, FileValue>) => {
       if (!threadId) return;
       // TODO: missing a way how to revalidate the internal state
       // I think we do want to have the ability to externally manage the state
