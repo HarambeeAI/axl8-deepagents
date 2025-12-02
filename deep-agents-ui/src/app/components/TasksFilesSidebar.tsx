@@ -36,12 +36,22 @@ interface BinaryFileData {
 
 // Helper to check if file data is binary
 function isBinaryFile(fileData: unknown): fileData is BinaryFileData {
-  return (
+  const result = (
     typeof fileData === "object" &&
     fileData !== null &&
     "is_binary" in fileData &&
     (fileData as BinaryFileData).is_binary === true
   );
+  // Debug logging
+  if (typeof fileData === "object" && fileData !== null) {
+    console.log("[isBinaryFile] Checking file:", {
+      hasIsBinary: "is_binary" in fileData,
+      isBinaryValue: (fileData as BinaryFileData).is_binary,
+      hasContentBase64: "content_base64" in fileData,
+      result,
+    });
+  }
+  return result;
 }
 
 // Helper to get file icon based on extension
@@ -103,13 +113,16 @@ interface SelectedBinaryFile {
   data: BinaryFileData;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type FileValue = string | BinaryFileData | { content: string[] } | any;
+
 export function FilesPopover({
   files,
   setFiles,
   editDisabled,
 }: {
-  files: Record<string, string>;
-  setFiles: (files: Record<string, string>) => Promise<void>;
+  files: Record<string, FileValue>;
+  setFiles: (files: Record<string, FileValue>) => Promise<void>;
   editDisabled: boolean;
 }) {
   const [selectedFile, setSelectedFile] = useState<FileItem | null>(null);
@@ -240,8 +253,8 @@ export function FilesPopover({
 
 export const TasksFilesSidebar = React.memo<{
   todos: TodoItem[];
-  files: Record<string, string>;
-  setFiles: (files: Record<string, string>) => Promise<void>;
+  files: Record<string, FileValue>;
+  setFiles: (files: Record<string, FileValue>) => Promise<void>;
 }>(({ todos, files, setFiles }) => {
   const { isLoading, interrupt } = useChatContext();
   const [tasksOpen, setTasksOpen] = useState(false);
