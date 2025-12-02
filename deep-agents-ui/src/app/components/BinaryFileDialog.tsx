@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useCallback, useEffect, useMemo } from "react";
 import {
   FileSpreadsheet,
   FileImage,
@@ -8,9 +8,6 @@ import {
   FileText,
   Download,
   ExternalLink,
-  X,
-  Loader2,
-  Eye,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -80,10 +77,6 @@ function getDocTypeName(filePath: string): string {
 
 export const BinaryFileDialog = React.memo<BinaryFileDialogProps>(
   ({ filePath, fileData, onClose }) => {
-    const [isUploading, setIsUploading] = useState(false);
-    const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-    const [error, setError] = useState<string | null>(null);
-
     const fileName = filePath.split("/").pop() || "document";
     const ext = filePath.split(".").pop()?.toLowerCase() || "";
 
@@ -124,7 +117,7 @@ export const BinaryFileDialog = React.memo<BinaryFileDialogProps>(
     const isPdf = ext === "pdf";
     
     // Create blob URL for PDF preview
-    const pdfBlobUrl = React.useMemo(() => {
+    const pdfBlobUrl = useMemo(() => {
       if (!isPdf) return null;
       try {
         const byteCharacters = atob(fileData.content_base64);
