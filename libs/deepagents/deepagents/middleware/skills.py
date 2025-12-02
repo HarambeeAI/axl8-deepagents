@@ -18,6 +18,7 @@ from enum import Enum
 
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain.tools import ToolRuntime
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
 
@@ -403,29 +404,35 @@ def _create_document_sync(
         # The file content is binary, so we store it as base64 in the state
         timestamp = datetime.now(timezone.utc).isoformat()
         
-        # Try to update state via runtime
-        if hasattr(runtime, 'state') and runtime.state is not None:
-            # Update the files state with base64 encoded content
-            # This makes it available in the UI's Files panel
-            files_update = {
-                file_path: {
-                    "content": [f"[Binary {document_type.upper()} file - {len(content)} bytes]"],
-                    "content_base64": base64.b64encode(content).decode("utf-8"),
-                    "content_type": CONTENT_TYPES.get(document_type, "application/octet-stream"),
-                    "created_at": timestamp,
-                    "modified_at": timestamp,
-                    "is_binary": True,
-                    "size": len(content),
-                }
+        # Update the files state with base64 encoded content
+        # This makes it available in the UI's Files panel
+        files_update = {
+            file_path: {
+                "content": [f"[Binary {document_type.upper()} file - {len(content)} bytes]"],
+                "content_base64": base64.b64encode(content).decode("utf-8"),
+                "content_type": CONTENT_TYPES.get(document_type, "application/octet-stream"),
+                "created_at": timestamp,
+                "modified_at": timestamp,
+                "is_binary": True,
+                "size": len(content),
             }
-            
-            # Return a Command to update state
-            return Command(
-                update={"files": files_update},
-            )
+        }
         
-        # If no state access, just return success message with base64 for manual handling
-        return f"Successfully created {document_type.upper()} document: {clean_filename} ({len(content)} bytes)\n\n[Document content available as base64 - {len(content)} bytes]"
+        # Success message for the tool response
+        success_message = f"Successfully created {document_type.upper()} document: {file_path} ({len(content)} bytes). The file is now available in the Files panel."
+        
+        # Return a Command to update state with the required ToolMessage
+        return Command(
+            update={
+                "files": files_update,
+                "messages": [
+                    ToolMessage(
+                        content=success_message,
+                        tool_call_id=runtime.tool_call_id,
+                    )
+                ],
+            },
+        )
         
     except Exception as e:
         print(f"[Skills] Error: {str(e)}")
