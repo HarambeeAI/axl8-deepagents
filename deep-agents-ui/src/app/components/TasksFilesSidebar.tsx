@@ -74,22 +74,32 @@ function getFileIcon(filePath: string, isBinary: boolean) {
 // Helper to download binary file
 function downloadBinaryFile(filePath: string, fileData: BinaryFileData) {
   const fileName = filePath.split("/").pop() || "download";
-  const byteCharacters = atob(fileData.content_base64);
-  const byteNumbers = new Array(byteCharacters.length);
-  for (let i = 0; i < byteCharacters.length; i++) {
-    byteNumbers[i] = byteCharacters.charCodeAt(i);
-  }
-  const byteArray = new Uint8Array(byteNumbers);
-  const blob = new Blob([byteArray], { type: fileData.content_type });
   
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fileName;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  // Prefer download_url if available (from Supabase Storage)
+  if (fileData.download_url) {
+    window.open(fileData.download_url, "_blank");
+    return;
+  }
+  
+  // Fallback to base64 if available
+  if (fileData.content_base64) {
+    const byteCharacters = atob(fileData.content_base64);
+    const byteNumbers = new Array(byteCharacters.length);
+    for (let i = 0; i < byteCharacters.length; i++) {
+      byteNumbers[i] = byteCharacters.charCodeAt(i);
+    }
+    const byteArray = new Uint8Array(byteNumbers);
+    const blob = new Blob([byteArray], { type: fileData.content_type });
+    
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
 }
 
 // Format file size
