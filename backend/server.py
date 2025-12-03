@@ -861,8 +861,32 @@ async def create_run_stream(thread_id: str, request: Request):
                         # Check for files update
                         if "files" in output:
                             for path, file_data in output["files"].items():
-                                if isinstance(file_data, dict) and "content" in file_data:
-                                    thread["values"]["files"][path] = "\n".join(file_data["content"])
+                                if isinstance(file_data, dict):
+                                    # Check if it's a binary file from Claude Skills
+                                    if file_data.get("is_binary"):
+                                        # Preserve binary file metadata for frontend
+                                        binary_data = {
+                                            "content": file_data.get("content", ["[Binary file]"])[0] if isinstance(file_data.get("content"), list) else file_data.get("content", "[Binary file]"),
+                                            "is_binary": True,
+                                            "content_type": file_data.get("content_type", "application/octet-stream"),
+                                            "size": file_data.get("size", 0),
+                                        }
+                                        # Include download_url if available
+                                        if file_data.get("download_url"):
+                                            binary_data["download_url"] = file_data["download_url"]
+                                        elif file_data.get("content_base64"):
+                                            binary_data["content_base64"] = file_data["content_base64"]
+                                        thread["values"]["files"][path] = binary_data
+                                        print(f"[Stream] Binary file stored: {path} (is_binary=True, has_url={bool(file_data.get('download_url'))})")
+                                    elif "content" in file_data:
+                                        # Regular text file with content array
+                                        content = file_data["content"]
+                                        if isinstance(content, list):
+                                            thread["values"]["files"][path] = "\n".join(content)
+                                        else:
+                                            thread["values"]["files"][path] = str(content)
+                                    else:
+                                        thread["values"]["files"][path] = str(file_data)
                                 elif file_data is not None:
                                     thread["values"]["files"][path] = str(file_data)
                             print(f"[Stream] Files updated: {list(output['files'].keys())}")
