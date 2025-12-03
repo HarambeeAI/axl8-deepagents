@@ -18,7 +18,8 @@ import { useQueryState } from "nuqs";
 export interface BinaryFileData {
   content: string;
   is_binary: boolean;
-  content_base64: string;
+  content_base64?: string;  // Fallback if no download_url
+  download_url?: string;    // Public URL from Supabase Storage
   content_type: string;
   size: number;
 }

@@ -399,27 +399,60 @@ def _create_document_sync(
         
         # Determine the file path
         file_path = f"{workspace_path}/{clean_filename}"
-        
-        # Save to agent's file state if available
-        # The file content is binary, so we store it as base64 in the state
         timestamp = datetime.now(timezone.utc).isoformat()
+        content_type = CONTENT_TYPES.get(document_type, "application/octet-stream")
         
-        # Update the files state with base64 encoded content
-        # This makes it available in the UI's Files panel
-        files_update = {
-            file_path: {
-                "content": [f"[Binary {document_type.upper()} file - {len(content)} bytes]"],
-                "content_base64": base64.b64encode(content).decode("utf-8"),
-                "content_type": CONTENT_TYPES.get(document_type, "application/octet-stream"),
-                "created_at": timestamp,
-                "modified_at": timestamp,
-                "is_binary": True,
-                "size": len(content),
-            }
+        # Try to upload to Supabase Storage for public URL access
+        public_url = None
+        try:
+            supabase_url = os.getenv("SUPABASE_URL")
+            supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+            
+            if supabase_url and supabase_key:
+                from supabase import create_client
+                supabase = create_client(supabase_url, supabase_key)
+                
+                # Upload to generated-files bucket
+                bucket_name = "generated-files"
+                storage_path = f"{int(datetime.now().timestamp())}-{clean_filename}"
+                
+                # Upload the file
+                result = supabase.storage.from_(bucket_name).upload(
+                    storage_path,
+                    content,
+                    file_options={"content-type": content_type}
+                )
+                
+                # Get public URL
+                url_result = supabase.storage.from_(bucket_name).get_public_url(storage_path)
+                public_url = url_result
+                print(f"[Skills] Uploaded to Supabase Storage: {public_url}")
+        except Exception as upload_error:
+            print(f"[Skills] Supabase upload failed (falling back to base64): {upload_error}")
+        
+        # Build file data for state
+        file_data = {
+            "content": [f"[Binary {document_type.upper()} file - {len(content)} bytes]"],
+            "content_type": content_type,
+            "created_at": timestamp,
+            "modified_at": timestamp,
+            "is_binary": True,
+            "size": len(content),
         }
         
+        # Add URL if uploaded, otherwise include base64 as fallback
+        if public_url:
+            file_data["download_url"] = public_url
+        else:
+            file_data["content_base64"] = base64.b64encode(content).decode("utf-8")
+        
+        files_update = {file_path: file_data}
+        
         # Success message for the tool response
-        success_message = f"Successfully created {document_type.upper()} document: {file_path} ({len(content)} bytes). The file is now available in the Files panel."
+        if public_url:
+            success_message = f"Successfully created {document_type.upper()} document: {clean_filename} ({len(content)} bytes). The file is available for download."
+        else:
+            success_message = f"Successfully created {document_type.upper()} document: {file_path} ({len(content)} bytes). The file is now available in the Files panel."
         
         # Return a Command to update state with the required ToolMessage
         return Command(

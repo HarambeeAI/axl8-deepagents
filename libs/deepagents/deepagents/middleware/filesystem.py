@@ -60,13 +60,16 @@ class FileData(TypedDict, total=False):
     """Whether this is a binary file."""
     
     content_base64: str
-    """Base64 encoded content for binary files."""
+    """Base64 encoded content for binary files (fallback if no URL)."""
     
     content_type: str
     """MIME type of the file."""
     
     size: int
     """Size of the file in bytes."""
+    
+    download_url: str
+    """Public URL for downloading the file (from Supabase Storage)."""
 
 
 def _file_data_reducer(left: dict[str, FileData] | None, right: dict[str, FileData | None]) -> dict[str, FileData]:

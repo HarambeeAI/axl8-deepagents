@@ -243,18 +243,24 @@ def extract_state_from_agent_state(agent_state: dict) -> dict:
             print(f"[Files] Processing {path}: type={type(file_data)}, is_dict={isinstance(file_data, dict)}")
             if isinstance(file_data, dict):
                 print(f"[Files] Dict keys: {file_data.keys()}")
-                print(f"[Files] is_binary={file_data.get('is_binary')}, has_base64={bool(file_data.get('content_base64'))}")
+                print(f"[Files] is_binary={file_data.get('is_binary')}, has_url={bool(file_data.get('download_url'))}, has_base64={bool(file_data.get('content_base64'))}")
                 # Check if it's a binary file from Skills
-                if file_data.get("is_binary") and file_data.get("content_base64"):
-                    # For binary files, include metadata for download
-                    files[path] = {
+                if file_data.get("is_binary"):
+                    # For binary files, include metadata for download/preview
+                    binary_file_data = {
                         "content": file_data.get("content", ["[Binary file]"])[0] if file_data.get("content") else "[Binary file]",
                         "is_binary": True,
-                        "content_base64": file_data["content_base64"],
                         "content_type": file_data.get("content_type", "application/octet-stream"),
                         "size": file_data.get("size", 0),
                     }
-                    print(f"[Files] Binary file detected, preserving metadata")
+                    # Prefer download_url over base64
+                    if file_data.get("download_url"):
+                        binary_file_data["download_url"] = file_data["download_url"]
+                        print(f"[Files] Binary file with download URL")
+                    elif file_data.get("content_base64"):
+                        binary_file_data["content_base64"] = file_data["content_base64"]
+                        print(f"[Files] Binary file with base64 fallback")
+                    files[path] = binary_file_data
                 elif "content" in file_data:
                     # FileData format: {"content": [...lines...], ...}
                     files[path] = "\n".join(file_data["content"])
