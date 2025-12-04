@@ -86,7 +86,7 @@ export const BinaryFileDialog = React.memo<BinaryFileDialogProps>(
 
     // Check if we have a download URL (from Supabase Storage)
     const hasDownloadUrl = !!fileData.download_url;
-    const hasBase64 = !!fileData.content_base64;
+    const _hasBase64 = !!fileData.content_base64; // Prefixed with _ to indicate intentionally unused
 
     // Google Docs Viewer URL for Office documents
     const googleDocsViewerUrl = useMemo(() => {
