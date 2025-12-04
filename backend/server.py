@@ -900,6 +900,10 @@ async def create_run_stream(thread_id: str, request: Request):
                                 elif file_data is not None:
                                     thread["values"]["files"][path] = str(file_data)
                             print(f"[Stream] Files updated: {list(output['files'].keys())}")
+                            # Debug: Log the actual file data being sent
+                            for fpath, fdata in thread["values"]["files"].items():
+                                if isinstance(fdata, dict):
+                                    print(f"[Stream] File in values: {fpath} -> is_binary={fdata.get('is_binary')}, has_url={bool(fdata.get('download_url'))}, url_preview={str(fdata.get('download_url', ''))[:60]}")
                             yield make_event("values", thread["values"])
             
             print(f"[Stream] Agent finished. Response length: {len(accumulated_content)}", flush=True)
