@@ -422,8 +422,18 @@ async def get_thread_state(thread_id: str):
         raise HTTPException(status_code=404, detail="Thread not found")
     
     thread = threads[thread_id]
+    values = thread.get("values", create_empty_state())
+    
+    # Debug: Log files data being sent to frontend
+    if "files" in values:
+        for path, file_data in values["files"].items():
+            if isinstance(file_data, dict):
+                print(f"[State API] File {path}: is_binary={file_data.get('is_binary')}, has_url={bool(file_data.get('download_url'))}, url={file_data.get('download_url', 'N/A')[:50] if file_data.get('download_url') else 'N/A'}")
+            else:
+                print(f"[State API] File {path}: type={type(file_data).__name__}")
+    
     return {
-        "values": thread.get("values", create_empty_state()),
+        "values": values,
         "next": [],
         "checkpoint": {
             "thread_id": thread_id,
