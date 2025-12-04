@@ -104,15 +104,18 @@ class SkillsClient:
             "anthropic-beta": self.BETA_FEATURES,
         }
     
-    def generate_document(
+    def generate_documents(
         self,
         document_type: str,
         description: str,
-    ) -> tuple[Optional[bytes], Optional[str], Optional[str]]:
-        """Generate a document using Claude Skills (synchronous).
+    ) -> tuple[List[Dict[str, Any]], Optional[str]]:
+        """Generate documents using Claude Skills (synchronous).
+        
+        Returns ALL files created by Claude, not just the target document type.
         
         Returns:
-            Tuple of (file_content, filename, error_message)
+            Tuple of (list of file dicts with 'content', 'file_name', list, error_message)
+            Each file dict contains: {'content': bytes, 'file_name': str}
         """
         # Build the prompt for document generation
         prompt = f"""Create a {document_type.upper()} document with the following specifications:
@@ -138,7 +141,7 @@ Please generate this document now using the appropriate skill. Make it professio
         
         try:
             # Collect ALL files from the response
-            all_files: List[Dict[str, str]] = []
+            all_file_infos: List[Dict[str, str]] = []
             
             # Use synchronous httpx client with streaming
             with httpx.Client(timeout=300.0) as client:
@@ -173,40 +176,37 @@ Please generate this document now using the appropriate skill. Make it professio
                             file_infos = self._extract_all_file_info(data)
                             for file_info in file_infos:
                                 # Avoid duplicates
-                                if not any(f["file_id"] == file_info["file_id"] for f in all_files):
-                                    all_files.append(file_info)
+                                if not any(f["file_id"] == file_info["file_id"] for f in all_file_infos):
+                                    all_file_infos.append(file_info)
                                     print(f"[Skills] Found file: {file_info.get('file_name', 'unknown')} (id={file_info['file_id'][:20]}...)")
                 
-                if all_files:
-                    print(f"[Skills] Total files found: {len(all_files)}")
+                if all_file_infos:
+                    print(f"[Skills] Total files found: {len(all_file_infos)}")
                     
-                    # Find the file matching the requested document type
-                    target_extension = f".{document_type}"
-                    target_file = None
+                    # Download ALL files
+                    downloaded_files: List[Dict[str, Any]] = []
+                    for file_info in all_file_infos:
+                        try:
+                            content = self._download_file(client, file_info["file_id"])
+                            downloaded_files.append({
+                                "content": content,
+                                "file_name": file_info.get("file_name", "document"),
+                            })
+                            print(f"[Skills] Downloaded: {file_info.get('file_name', 'unknown')} ({len(content)} bytes)")
+                        except Exception as download_error:
+                            print(f"[Skills] Failed to download {file_info.get('file_name', 'unknown')}: {download_error}")
                     
-                    for file_info in all_files:
-                        file_name = file_info.get("file_name", "")
-                        if file_name.lower().endswith(target_extension):
-                            target_file = file_info
-                            print(f"[Skills] Selected target file: {file_name}")
-                            break
-                    
-                    # If no exact match, try to find any file with the right extension
-                    if not target_file:
-                        # Fall back to the last file (often the final output)
-                        target_file = all_files[-1]
-                        print(f"[Skills] No exact match for {target_extension}, using last file: {target_file.get('file_name', 'unknown')}")
-                    
-                    # Download the target file
-                    content = self._download_file(client, target_file["file_id"])
-                    return content, target_file.get("file_name"), None
+                    if downloaded_files:
+                        return downloaded_files, None
+                    else:
+                        return [], "Failed to download any files."
                 else:
-                    return None, None, "No document was generated. Claude may not have used the skill."
+                    return [], "No document was generated. Claude may not have used the skill."
                 
         except httpx.HTTPStatusError as e:
-            return None, None, f"API error: {e.response.status_code}"
+            return [], f"API error: {e.response.status_code}"
         except Exception as e:
-            return None, None, str(e)
+            return [], str(e)
     
     def _extract_all_file_info(self, event: Dict[str, Any]) -> List[Dict[str, str]]:
         """Extract ALL file information from SSE event.
@@ -392,6 +392,12 @@ class SkillsMiddleware(AgentMiddleware):
         return await handler(request)
 
 
+def _get_content_type_from_extension(filename: str) -> str:
+    """Get content type from file extension."""
+    ext = filename.split(".")[-1].lower() if "." in filename else ""
+    return CONTENT_TYPES.get(ext, "application/octet-stream")
+
+
 def _create_document_sync(
     document_type: str,
     filename: str,
@@ -399,7 +405,10 @@ def _create_document_sync(
     runtime: ToolRuntime,
     workspace_path: str,
 ) -> str:
-    """Synchronous implementation of document creation."""
+    """Synchronous implementation of document creation.
+    
+    Creates ALL files generated by Claude Skills and adds them to state.
+    """
     client = _get_skills_client()
     if not client:
         return "Error: Claude Skills not available - ANTHROPIC_API_KEY not configured"
@@ -409,15 +418,10 @@ def _create_document_sync(
         if document_type not in ["xlsx", "pptx", "pdf", "docx"]:
             return f"Error: Invalid document type '{document_type}'. Must be one of: xlsx, pptx, pdf, docx"
         
-        # Clean filename and add extension
-        clean_filename = filename.replace(" ", "_").replace("/", "_")
-        if not clean_filename.endswith(f".{document_type}"):
-            clean_filename = f"{clean_filename}.{document_type}"
+        print(f"[Skills] Generating {document_type.upper()} document based on: {filename}")
         
-        print(f"[Skills] Generating {document_type.upper()} document: {clean_filename}")
-        
-        # Generate the document
-        content, generated_name, error = client.generate_document(
+        # Generate ALL documents
+        files_list, error = client.generate_documents(
             document_type=document_type,
             description=description,
         )
@@ -425,69 +429,92 @@ def _create_document_sync(
         if error:
             return f"Error generating document: {error}"
         
-        if not content:
-            return "Error: No document content was generated"
+        if not files_list:
+            return "Error: No documents were generated"
         
-        print(f"[Skills] Document generated: {len(content)} bytes")
+        print(f"[Skills] Generated {len(files_list)} file(s)")
         
-        # Determine the file path
-        file_path = f"{workspace_path}/{clean_filename}"
+        # Process ALL files and add to state
+        files_update = {}
+        file_summaries = []
         timestamp = datetime.now(timezone.utc).isoformat()
-        content_type = CONTENT_TYPES.get(document_type, "application/octet-stream")
         
-        # Try to upload to Supabase Storage for public URL access
-        public_url = None
+        # Initialize Supabase client once
+        supabase = None
+        bucket_name = "generated-files"
         try:
             supabase_url = os.getenv("SUPABASE_URL")
             supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
-            
             if supabase_url and supabase_key:
                 from supabase import create_client
                 supabase = create_client(supabase_url, supabase_key)
-                
-                # Upload to generated-files bucket
-                bucket_name = "generated-files"
-                storage_path = f"{int(datetime.now().timestamp())}-{clean_filename}"
-                
-                # Upload the file
-                result = supabase.storage.from_(bucket_name).upload(
-                    storage_path,
-                    content,
-                    file_options={"content-type": content_type}
-                )
-                
-                # Get public URL
-                url_result = supabase.storage.from_(bucket_name).get_public_url(storage_path)
-                public_url = url_result
-                print(f"[Skills] Uploaded to Supabase Storage: {public_url}")
-        except Exception as upload_error:
-            print(f"[Skills] Supabase upload failed (falling back to base64): {upload_error}")
+        except Exception as e:
+            print(f"[Skills] Supabase client init failed: {e}")
         
-        # Build file data for state
-        file_data = {
-            "content": [f"[Binary {document_type.upper()} file - {len(content)} bytes]"],
-            "content_type": content_type,
-            "created_at": timestamp,
-            "modified_at": timestamp,
-            "is_binary": True,
-            "size": len(content),
-        }
+        for file_info in files_list:
+            content = file_info["content"]
+            original_filename = file_info["file_name"]
+            
+            # Clean filename
+            clean_filename = original_filename.replace(" ", "_").replace("/", "_")
+            file_path = f"{workspace_path}/{clean_filename}"
+            content_type = _get_content_type_from_extension(clean_filename)
+            
+            # Determine if this is a binary file
+            ext = clean_filename.split(".")[-1].lower() if "." in clean_filename else ""
+            is_binary = ext in ["xlsx", "pptx", "pdf", "docx", "png", "jpg", "jpeg", "gif", "zip"]
+            
+            # Try to upload to Supabase Storage
+            public_url = None
+            if supabase and is_binary:
+                try:
+                    storage_path = f"{int(datetime.now().timestamp())}-{clean_filename}"
+                    supabase.storage.from_(bucket_name).upload(
+                        storage_path,
+                        content,
+                        file_options={"content-type": content_type}
+                    )
+                    public_url = supabase.storage.from_(bucket_name).get_public_url(storage_path)
+                    print(f"[Skills] Uploaded {clean_filename} to Supabase: {public_url[:60]}...")
+                except Exception as upload_error:
+                    print(f"[Skills] Upload failed for {clean_filename}: {upload_error}")
+            
+            # Build file data for state
+            if is_binary:
+                file_data = {
+                    "content": [f"[Binary {ext.upper()} file - {len(content)} bytes]"],
+                    "content_type": content_type,
+                    "created_at": timestamp,
+                    "modified_at": timestamp,
+                    "is_binary": True,
+                    "size": len(content),
+                }
+                if public_url:
+                    file_data["download_url"] = public_url
+                else:
+                    file_data["content_base64"] = base64.b64encode(content).decode("utf-8")
+            else:
+                # Text file - store content directly
+                try:
+                    text_content = content.decode("utf-8")
+                except:
+                    text_content = content.decode("latin-1")
+                file_data = {
+                    "content": text_content.split("\n"),
+                    "content_type": content_type,
+                    "created_at": timestamp,
+                    "modified_at": timestamp,
+                }
+            
+            files_update[file_path] = file_data
+            file_summaries.append(f"- {clean_filename} ({len(content)} bytes)")
+            print(f"[Skills] Added to state: {file_path} (is_binary={is_binary})")
         
-        # Add URL if uploaded, otherwise include base64 as fallback
-        if public_url:
-            file_data["download_url"] = public_url
-        else:
-            file_data["content_base64"] = base64.b64encode(content).decode("utf-8")
+        # Success message listing all files
+        success_message = f"Successfully created {len(files_list)} file(s):\n" + "\n".join(file_summaries)
+        success_message += "\n\nAll files are now available in the Files panel."
         
-        files_update = {file_path: file_data}
-        
-        # Success message for the tool response
-        if public_url:
-            success_message = f"Successfully created {document_type.upper()} document: {clean_filename} ({len(content)} bytes). The file is available for download."
-        else:
-            success_message = f"Successfully created {document_type.upper()} document: {file_path} ({len(content)} bytes). The file is now available in the Files panel."
-        
-        # Return a Command to update state with the required ToolMessage
+        # Return a Command to update state with ALL files
         return Command(
             update={
                 "files": files_update,
