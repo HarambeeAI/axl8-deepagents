@@ -39,8 +39,11 @@ function isBinaryFile(fileData: unknown): fileData is BinaryFileData {
     console.log("[isBinaryFile] Checking file:", {
       hasIsBinary: "is_binary" in fileData,
       isBinaryValue: (fileData as BinaryFileData).is_binary,
+      hasDownloadUrl: "download_url" in fileData,
+      downloadUrl: (fileData as BinaryFileData).download_url,
       hasContentBase64: "content_base64" in fileData,
       result,
+      fullData: fileData,
     });
   }
   return result;

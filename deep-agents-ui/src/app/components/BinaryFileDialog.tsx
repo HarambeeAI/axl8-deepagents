@@ -74,6 +74,16 @@ export const BinaryFileDialog = React.memo<BinaryFileDialogProps>(
     const ext = filePath.split(".").pop()?.toLowerCase() || "";
     const [showPreview, setShowPreview] = useState(false);
 
+    // Debug logging
+    console.log("[BinaryFileDialog] fileData:", {
+      hasDownloadUrl: !!fileData.download_url,
+      downloadUrl: fileData.download_url,
+      hasBase64: !!fileData.content_base64,
+      contentType: fileData.content_type,
+      size: fileData.size,
+      isBinary: fileData.is_binary,
+    });
+
     // Check if we have a download URL (from Supabase Storage)
     const hasDownloadUrl = !!fileData.download_url;
     const hasBase64 = !!fileData.content_base64;
