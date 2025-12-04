@@ -137,8 +137,8 @@ Please generate this document now using the appropriate skill. Make it professio
         }
         
         try:
-            file_id = None
-            file_name = None
+            # Collect ALL files from the response
+            all_files: List[Dict[str, str]] = []
             
             # Use synchronous httpx client with streaming
             with httpx.Client(timeout=300.0) as client:
@@ -169,16 +169,37 @@ Please generate this document now using the appropriate skill. Make it professio
                             if not data:
                                 continue
                             
-                            # Look for file_id in various event structures
-                            file_info = self._extract_file_info(data)
-                            if file_info:
-                                file_id = file_info.get("file_id")
-                                file_name = file_info.get("file_name")
+                            # Collect ALL file_ids from the event
+                            file_infos = self._extract_all_file_info(data)
+                            for file_info in file_infos:
+                                # Avoid duplicates
+                                if not any(f["file_id"] == file_info["file_id"] for f in all_files):
+                                    all_files.append(file_info)
+                                    print(f"[Skills] Found file: {file_info.get('file_name', 'unknown')} (id={file_info['file_id'][:20]}...)")
                 
-                if file_id:
-                    # Download the file
-                    content = self._download_file(client, file_id)
-                    return content, file_name, None
+                if all_files:
+                    print(f"[Skills] Total files found: {len(all_files)}")
+                    
+                    # Find the file matching the requested document type
+                    target_extension = f".{document_type}"
+                    target_file = None
+                    
+                    for file_info in all_files:
+                        file_name = file_info.get("file_name", "")
+                        if file_name.lower().endswith(target_extension):
+                            target_file = file_info
+                            print(f"[Skills] Selected target file: {file_name}")
+                            break
+                    
+                    # If no exact match, try to find any file with the right extension
+                    if not target_file:
+                        # Fall back to the last file (often the final output)
+                        target_file = all_files[-1]
+                        print(f"[Skills] No exact match for {target_extension}, using last file: {target_file.get('file_name', 'unknown')}")
+                    
+                    # Download the target file
+                    content = self._download_file(client, target_file["file_id"])
+                    return content, target_file.get("file_name"), None
                 else:
                     return None, None, "No document was generated. Claude may not have used the skill."
                 
@@ -187,8 +208,13 @@ Please generate this document now using the appropriate skill. Make it professio
         except Exception as e:
             return None, None, str(e)
     
-    def _extract_file_info(self, event: Dict[str, Any]) -> Optional[Dict[str, str]]:
-        """Extract file information from SSE event."""
+    def _extract_all_file_info(self, event: Dict[str, Any]) -> List[Dict[str, str]]:
+        """Extract ALL file information from SSE event.
+        
+        Claude Skills may create multiple files (e.g., txt + pptx).
+        This method collects all of them so we can select the right one.
+        """
+        files: List[Dict[str, str]] = []
         event_type = event.get("type", "")
         
         # Check content_block_start
@@ -199,32 +225,39 @@ Please generate this document now using the appropriate skill. Make it professio
             if block_type in ("bash_code_execution_tool_result", "text_editor_code_execution_tool_result"):
                 content = content_block.get("content", {})
                 
+                # Handle nested content structure
                 if isinstance(content, dict) and "content" in content:
                     for item in content.get("content", []):
                         if isinstance(item, dict) and item.get("file_id"):
-                            return {
+                            files.append({
                                 "file_id": item["file_id"],
                                 "file_name": item.get("file_name", "document"),
-                            }
+                            })
                 
+                # Handle list content structure
                 if isinstance(content, list):
                     for item in content:
                         if isinstance(item, dict) and item.get("file_id"):
-                            return {
+                            files.append({
                                 "file_id": item["file_id"],
                                 "file_name": item.get("file_name", "document"),
-                            }
+                            })
         
         # Check content_block_delta
         if event_type == "content_block_delta":
             delta = event.get("delta", {})
             if delta.get("file_id"):
-                return {
+                files.append({
                     "file_id": delta["file_id"],
                     "file_name": delta.get("file_name", "document"),
-                }
+                })
         
-        return None
+        return files
+    
+    def _extract_file_info(self, event: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        """Extract file information from SSE event (legacy, returns first match)."""
+        files = self._extract_all_file_info(event)
+        return files[0] if files else None
     
     def _download_file(self, client: httpx.Client, file_id: str) -> bytes:
         """Download file from Claude Files API."""
